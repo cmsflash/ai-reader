@@ -1,7 +1,9 @@
 {
   "name": "ai-reader",
   "version": "0.1.0",
+  "description": "Minimal web MVP for saving URLs and documents as readable articles.",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "next dev --turbopack",
