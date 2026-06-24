@@ -1,0 +1,137 @@
+import { createHash } from "node:crypto";
+import { blocksToHtml } from "@/lib/extractors";
+import { imageFetchHeaders } from "@/server/artifacts/imageRequests";
+import { getArtifactStorage } from "@/server/runtime/artifactStorage";
+import type { Article, ArticleBlock } from "@/lib/types";
+
+const maxArtifactBytes = 30 * 1024 * 1024;
+
+export async function archiveArticleArtifacts(article: Article): Promise<Article> {
+  let changed = false;
+  const archivedBlocks: ArticleBlock[] = [];
+
+  for (const [index, block] of article.blocks.entries()) {
+    if (block.type !== "image") {
+      archivedBlocks.push(block);
+      continue;
+    }
+
+    const archived = await archiveImageBlock(article, block, index);
+    changed ||= archived !== block;
+    archivedBlocks.push(archived);
+  }
+
+  if (!changed) {
+    return article;
+  }
+
+  return {
+    ...article,
+    blocks: archivedBlocks,
+    contentHtml: blocksToHtml(archivedBlocks),
+  };
+}
+
+export async function deleteArticleArtifacts(article: Article) {
+  const keys = article.blocks
+    .filter((block): block is Extract<ArticleBlock, { type: "image" }> => block.type === "image")
+    .map((block) => block.artifactKey)
+    .filter((key): key is string => Boolean(key));
+
+  await Promise.allSettled(keys.map((key) => getArtifactStorage().delete(key)));
+}
+
+async function archiveImageBlock(
+  article: Article,
+  block: Extract<ArticleBlock, { type: "image" }>,
+  index: number,
+) {
+  const source = remoteImageUrl(block.originalSrc ?? block.src);
+
+  if (!source || block.artifactKey) {
+    return block;
+  }
+
+  try {
+    const sourceUrl = article.sourceUrl ? new URL(article.sourceUrl) : null;
+    const response = await fetch(source.href, {
+      headers: imageFetchHeaders(source, sourceUrl),
+      redirect: "follow",
+    });
+
+    if (!response.ok) {
+      return block;
+    }
+
+    const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+
+    if (!contentType.toLowerCase().startsWith("image/")) {
+      return block;
+    }
+
+    const body = Buffer.from(await response.arrayBuffer());
+
+    if (body.byteLength === 0 || body.byteLength > maxArtifactBytes) {
+      return block;
+    }
+
+    const key = artifactKeyForImage(article, source, contentType, index);
+    const stored = await getArtifactStorage().put({
+      key,
+      body,
+      contentType,
+      visibility: "public",
+    });
+
+    return {
+      ...block,
+      src: stored.url ?? block.src,
+      originalSrc: source.href,
+      artifactKey: stored.key,
+    };
+  } catch {
+    return block;
+  }
+}
+
+function remoteImageUrl(value: string | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+function artifactKeyForImage(article: Article, source: URL, contentType: string, index: number) {
+  const hash = createHash("sha256").update(source.href).digest("hex").slice(0, 20);
+  return `articles/${article.id}/images/${index}-${hash}.${extensionForImage(contentType, source)}`;
+}
+
+function extensionForImage(contentType: string, source: URL) {
+  const normalizedType = contentType.toLowerCase().split(";")[0].trim();
+
+  switch (normalizedType) {
+    case "image/avif":
+      return "avif";
+    case "image/gif":
+      return "gif";
+    case "image/jpeg":
+    case "image/jpg":
+      return "jpg";
+    case "image/png":
+      return "png";
+    case "image/svg+xml":
+      return "svg";
+    case "image/webp":
+      return "webp";
+    default: {
+      const extension = source.pathname.split(".").at(-1)?.toLowerCase();
+      return extension && /^[a-z0-9]{2,5}$/.test(extension) ? extension : "bin";
+    }
+  }
+}

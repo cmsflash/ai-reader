@@ -1,0 +1,15 @@
+node_modules
+.next
+out
+build
+dist
+.env*
+!.env.example
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+tsconfig.tsbuildinfo
+data/articles.json
+data/*.tmp
+data/artifacts/

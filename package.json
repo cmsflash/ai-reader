@@ -1,0 +1,35 @@
+{
+  "name": "ai-reader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@babel/parser": "^8.0.0",
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^26.1.0",
+    "lucide-react": "^0.511.0",
+    "mammoth": "^1.9.1",
+    "marked": "^15.0.12",
+    "next": "^16.2.6",
+    "pdf-parse": "^1.1.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "sanitize-html": "^2.17.0"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@types/sanitize-html": "^2.16.0",
+    "eslint": "^9.27.0",
+    "eslint-config-next": "^16.2.6",
+    "typescript": "^5.8.3"
+  }
+}
