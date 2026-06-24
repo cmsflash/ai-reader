@@ -1,4 +1,5 @@
 import { LocalJsonArticleRepository } from "@/server/adapters/localJsonArticleRepository";
+import { PostgresArticleRepository } from "@/server/adapters/postgresArticleRepository";
 import type { ArticleRepository } from "@/server/ports/articleRepository";
 
 type ArticleRepositoryDriver = "local-json" | "firebase" | "supabase" | "postgres";
@@ -16,9 +17,11 @@ export function getArticleRepository(): ArticleRepository {
     case "local-json":
       repository = new LocalJsonArticleRepository();
       return repository;
+    case "postgres":
+      repository = new PostgresArticleRepository();
+      return repository;
     case "firebase":
     case "supabase":
-    case "postgres":
       throw new Error(
         `ARTICLE_REPOSITORY_DRIVER=${driver} is configured, but its adapter is not implemented yet.`,
       );

@@ -3,6 +3,7 @@ import { getArticleRepository } from "@/server/runtime/articleRepository";
 import { getTtsProvider } from "@/server/runtime/ttsProvider";
 
 export const runtime = "nodejs";
+export const maxDuration = 30;
 
 const maxTextLength = 1200;
 

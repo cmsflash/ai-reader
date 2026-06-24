@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { imageFetchHeaders } from "@/server/artifacts/imageRequests";
 
 export const runtime = "nodejs";
+export const maxDuration = 30;
 
 export async function GET(request: Request) {
   try {

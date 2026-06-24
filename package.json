@@ -5,15 +5,22 @@
   "private": true,
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "db:migrate": "node scripts/migrate-postgres.mjs",
+    "db:import-local": "node scripts/import-local-json-to-postgres.mjs"
   },
   "dependencies": {
     "@babel/parser": "^8.0.0",
     "@mozilla/readability": "^0.6.0",
+    "@neondatabase/serverless": "^1.1.0",
+    "@vercel/blob": "^2.4.1",
     "jsdom": "^26.1.0",
     "lucide-react": "^0.511.0",
     "mammoth": "^1.9.1",

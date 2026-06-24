@@ -6,6 +6,7 @@ import {
 } from "@/server/articles/articleService";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 export async function GET() {
   const articles = await listArticleSummaries();

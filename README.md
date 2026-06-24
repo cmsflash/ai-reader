@@ -11,6 +11,8 @@ npm run dev
 
 Local article data, archived artifacts, and secrets are intentionally ignored.
 
+For production setup, see `docs/production.md`.
+
 ## License
 
 MIT

@@ -1,7 +1,8 @@
 import { LocalFileArtifactStorage } from "@/server/adapters/localFileArtifactStorage";
+import { VercelBlobArtifactStorage } from "@/server/adapters/vercelBlobArtifactStorage";
 import type { ArtifactStorage } from "@/server/ports/artifactStorage";
 
-type ArtifactStorageDriver = "local-file" | "firebase" | "supabase" | "s3";
+type ArtifactStorageDriver = "local-file" | "vercel-blob" | "firebase" | "supabase" | "s3";
 
 let storage: ArtifactStorage | null = null;
 
@@ -15,6 +16,9 @@ export function getArtifactStorage(): ArtifactStorage {
   switch (driver) {
     case "local-file":
       storage = new LocalFileArtifactStorage();
+      return storage;
+    case "vercel-blob":
+      storage = new VercelBlobArtifactStorage();
       return storage;
     case "firebase":
     case "supabase":
@@ -31,7 +35,13 @@ export function getArtifactStorage(): ArtifactStorage {
 function getDriver(): ArtifactStorageDriver {
   const driver = process.env.ARTIFACT_STORAGE_DRIVER ?? "local-file";
 
-  if (driver === "local-file" || driver === "firebase" || driver === "supabase" || driver === "s3") {
+  if (
+    driver === "local-file" ||
+    driver === "vercel-blob" ||
+    driver === "firebase" ||
+    driver === "supabase" ||
+    driver === "s3"
+  ) {
     return driver;
   }
 
