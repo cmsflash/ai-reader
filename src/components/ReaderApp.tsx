@@ -4,6 +4,7 @@ import {
   BookOpen,
   FileText,
   Link as LinkIcon,
+  LogOut,
   Pause,
   Play,
   Plus,
@@ -39,6 +40,12 @@ type PendingImport = {
   sourceType: SourceType;
 };
 
+type AuthStatusResponse = {
+  enabled: boolean;
+  authenticated: boolean;
+  username?: string;
+};
+
 export function ReaderApp() {
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [pendingImports, setPendingImports] = useState<PendingImport[]>([]);
@@ -52,6 +59,7 @@ export function ReaderApp() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [currentSentence, setCurrentSentence] = useState(0);
   const [rate, setRate] = useState(1);
+  const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const articleIdRef = useRef<string | null>(null);
@@ -117,6 +125,30 @@ export function ReaderApp() {
       setError(messageFromError(loadError));
       setStatus(null);
     }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAuthStatus() {
+      const response = await fetch("/api/auth/me");
+
+      if (!response.ok) {
+        return;
+      }
+
+      const data = (await response.json()) as AuthStatusResponse;
+
+      if (!cancelled) {
+        setAuthStatus(data);
+      }
+    }
+
+    void loadAuthStatus().catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -506,6 +538,12 @@ export function ReaderApp() {
     }
   }
 
+  async function handleSignOut() {
+    stopSpeaking();
+    await fetch("/api/auth/logout", { method: "POST" });
+    window.location.assign("/login");
+  }
+
   const readableProgress = article ? progressRatio(article) : 0;
 
   return (
@@ -519,15 +557,28 @@ export function ReaderApp() {
             <h1>AI Reader</h1>
             <p>{libraryCountLabel(articles.length, pendingImports.length)}</p>
           </div>
-          <button
-            className="icon-button"
-            type="button"
-            title="Refresh"
-            aria-label="Refresh"
-            onClick={() => void loadArticles(true)}
-          >
-            <RefreshCw size={18} />
-          </button>
+          <div className="brand-actions">
+            <button
+              className="icon-button"
+              type="button"
+              title="Refresh"
+              aria-label="Refresh"
+              onClick={() => void loadArticles(true)}
+            >
+              <RefreshCw size={18} />
+            </button>
+            {authStatus?.enabled ? (
+              <button
+                className="icon-button"
+                type="button"
+                title="Sign out"
+                aria-label="Sign out"
+                onClick={() => void handleSignOut()}
+              >
+                <LogOut size={18} />
+              </button>
+            ) : null}
+          </div>
         </header>
 
         <form className="import-form" onSubmit={handleUrlSubmit}>
@@ -972,6 +1023,12 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const data = (await response.json().catch(() => ({}))) as { error?: string };
 
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== "undefined") {
+      window.location.assign(
+        `/login?next=${encodeURIComponent(`${window.location.pathname}${window.location.search}`)}`,
+      );
+    }
+
     throw new Error(data.error ?? `Request failed with ${response.status}`);
   }
 

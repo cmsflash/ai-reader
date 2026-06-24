@@ -72,9 +72,14 @@ button:disabled {
 
 .brand-row {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) 36px;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
+}
+
+.brand-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .brand-mark,
@@ -242,6 +247,72 @@ button:disabled {
   border-color: #e1b9b5;
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+.login-page {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-panel {
+  width: min(100%, 420px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 24px;
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.login-brand h1,
+.login-brand p {
+  margin: 0;
+}
+
+.login-brand h1 {
+  font-size: 1.35rem;
+}
+
+.login-brand p {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.login-form {
+  display: grid;
+  gap: 14px;
+}
+
+.login-form label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.login-form input {
+  width: 100%;
+  height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  padding: 0 12px;
+}
+
+.login-form input:focus {
+  border-color: var(--accent);
+  outline: 2px solid rgba(39, 108, 93, 0.18);
+  outline-offset: 1px;
 }
 
 .article-list {

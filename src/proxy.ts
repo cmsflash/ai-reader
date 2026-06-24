@@ -1,49 +1,67 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { getAuthConfig, sessionCookieName, verifySessionToken } from "@/server/auth/session";
 
-export function proxy(request: NextRequest) {
-  const password = process.env.AI_READER_BASIC_AUTH_PASSWORD;
+export async function proxy(request: NextRequest) {
+  const config = getAuthConfig();
+  const pathname = request.nextUrl.pathname;
 
-  if (!password) {
+  if (!config.enabled || isPublicPath(pathname)) {
     return NextResponse.next();
   }
 
-  const username = process.env.AI_READER_BASIC_AUTH_USERNAME || "reader";
-  const authHeader = request.headers.get("authorization");
+  if (!config.configured) {
+    return setupRequiredResponse(request);
+  }
 
-  if (isAuthorized(authHeader, username, password)) {
+  const username = await verifySessionToken(request.cookies.get(sessionCookieName)?.value);
+
+  if (username) {
     return NextResponse.next();
   }
 
-  return new NextResponse("Authentication required.", {
-    status: 401,
-    headers: {
-      "www-authenticate": 'Basic realm="AI Reader", charset="UTF-8"',
-    },
-  });
+  return unauthorizedResponse(request);
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!_next/|favicon.ico).*)"],
 };
 
-function isAuthorized(authHeader: string | null, username: string, password: string) {
-  if (!authHeader?.startsWith("Basic ")) {
-    return false;
+function isPublicPath(pathname: string) {
+  return (
+    pathname === "/login" ||
+    pathname === "/api/auth/login" ||
+    pathname === "/api/auth/logout" ||
+    pathname === "/api/auth/me"
+  );
+}
+
+function setupRequiredResponse(request: NextRequest) {
+  if (isApiRequest(request)) {
+    return NextResponse.json({ error: "Authentication is not configured." }, { status: 503 });
   }
 
-  try {
-    const credentials = atob(authHeader.slice("Basic ".length));
-    const separatorIndex = credentials.indexOf(":");
-
-    if (separatorIndex === -1) {
-      return false;
-    }
-
-    return (
-      credentials.slice(0, separatorIndex) === username &&
-      credentials.slice(separatorIndex + 1) === password
-    );
-  } catch {
-    return false;
+  if (request.nextUrl.pathname === "/login") {
+    return NextResponse.next();
   }
+
+  const url = request.nextUrl.clone();
+  url.pathname = "/login";
+  url.search = "?setup=1";
+  return NextResponse.redirect(url);
+}
+
+function unauthorizedResponse(request: NextRequest) {
+  if (isApiRequest(request)) {
+    return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+  }
+
+  const url = request.nextUrl.clone();
+  const next = `${request.nextUrl.pathname}${request.nextUrl.search}`;
+  url.pathname = "/login";
+  url.search = `?next=${encodeURIComponent(next)}`;
+  return NextResponse.redirect(url);
+}
+
+function isApiRequest(request: NextRequest) {
+  return request.nextUrl.pathname.startsWith("/api/");
 }
