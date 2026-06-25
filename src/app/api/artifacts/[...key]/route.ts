@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireAppUserResponse } from "@/server/auth/access";
 import { getArtifactStorage } from "@/server/runtime/artifactStorage";
 
 export const runtime = "nodejs";
@@ -10,6 +11,12 @@ type RouteContext = {
 };
 
 export async function GET(_request: Request, context: RouteContext) {
+  const authError = await requireAppUserResponse();
+
+  if (authError) {
+    return authError;
+  }
+
   const { key } = await context.params;
   const artifact = await getArtifactStorage().get(key.join("/"));
 

@@ -7,17 +7,17 @@ import { getArticleRepository } from "@/server/runtime/articleRepository";
 import type { ArticleProgressPatch } from "@/server/ports/articleRepository";
 import { toArticleSummary } from "@/server/ports/articleRepository";
 
-export async function listArticleSummaries() {
-  return getArticleRepository().list();
+export async function listArticleSummaries(ownerEmail: string) {
+  return getArticleRepository().list(ownerEmail);
 }
 
-export async function getSavedArticle(id: string) {
-  return getArticleRepository().findById(id);
+export async function getSavedArticle(id: string, ownerEmail: string) {
+  return getArticleRepository().findById(id, ownerEmail);
 }
 
-export async function importUrlArticle(url: string) {
+export async function importUrlArticle(url: string, ownerEmail: string) {
   const article = await archiveArticleArtifacts(await articleFromUrl(url));
-  const saved = await getArticleRepository().create(article);
+  const saved = await getArticleRepository().create(article, ownerEmail);
 
   return {
     article: saved,
@@ -25,9 +25,9 @@ export async function importUrlArticle(url: string) {
   };
 }
 
-export async function importFileArticle(file: File) {
+export async function importFileArticle(file: File, ownerEmail: string) {
   const article = await articleFromFile(file);
-  const saved = await getArticleRepository().create(article);
+  const saved = await getArticleRepository().create(article, ownerEmail);
 
   return {
     article: saved,
@@ -35,8 +35,12 @@ export async function importFileArticle(file: File) {
   };
 }
 
-export async function updateSavedArticleProgress(id: string, progress: ArticleProgressPatch) {
-  const article = await getArticleRepository().updateProgress(id, progress);
+export async function updateSavedArticleProgress(
+  id: string,
+  ownerEmail: string,
+  progress: ArticleProgressPatch,
+) {
+  const article = await getArticleRepository().updateProgress(id, ownerEmail, progress);
 
   if (!article) {
     return null;
@@ -48,9 +52,9 @@ export async function updateSavedArticleProgress(id: string, progress: ArticlePr
   };
 }
 
-export async function deleteSavedArticle(id: string) {
-  const article = await getArticleRepository().findById(id);
-  const deleted = await getArticleRepository().deleteById(id);
+export async function deleteSavedArticle(id: string, ownerEmail: string) {
+  const article = await getArticleRepository().findById(id, ownerEmail);
+  const deleted = await getArticleRepository().deleteById(id, ownerEmail);
 
   if (deleted && article) {
     await deleteArticleArtifacts(article);

@@ -11,6 +11,10 @@ type LocalJsonArticleRepositoryOptions = {
   storePath?: string;
 };
 
+type StoredArticle = Article & {
+  ownerEmail?: string;
+};
+
 export class LocalJsonArticleRepository implements ArticleRepository {
   private readonly storePath: string;
   private writeQueue = Promise.resolve();
@@ -19,29 +23,41 @@ export class LocalJsonArticleRepository implements ArticleRepository {
     this.storePath = resolveStorePath(options.storePath);
   }
 
-  async list() {
+  async list(ownerEmail: string) {
     const store = await this.readStore();
-    return store.articles.map(toArticleSummary);
+    return store.articles
+      .filter((article) => articleBelongsToOwner(article, ownerEmail))
+      .map(toArticleSummary);
   }
 
-  async findById(id: string) {
+  async findById(id: string, ownerEmail: string) {
     const store = await this.readStore();
-    return store.articles.find((article) => article.id === id) ?? null;
+    return (
+      store.articles.find(
+        (article) => article.id === id && articleBelongsToOwner(article, ownerEmail),
+      ) ?? null
+    );
   }
 
-  async create(article: Article) {
+  async create(article: Article, ownerEmail: string) {
     const store = await this.readStore();
+    const storedArticle: StoredArticle = {
+      ...article,
+      ownerEmail: normalizeOwnerEmail(ownerEmail),
+    };
     await this.writeStore({
       ...store,
-      articles: [article, ...store.articles],
+      articles: [storedArticle, ...store.articles],
     });
 
     return article;
   }
 
-  async updateProgress(id: string, progress: ArticleProgressPatch) {
+  async updateProgress(id: string, ownerEmail: string, progress: ArticleProgressPatch) {
     const store = await this.readStore();
-    const articleIndex = store.articles.findIndex((article) => article.id === id);
+    const articleIndex = store.articles.findIndex(
+      (article) => article.id === id && articleBelongsToOwner(article, ownerEmail),
+    );
 
     if (articleIndex === -1) {
       return null;
@@ -75,9 +91,11 @@ export class LocalJsonArticleRepository implements ArticleRepository {
     return updatedArticle;
   }
 
-  async addProcessingCost(id: string, costUsd: number) {
+  async addProcessingCost(id: string, ownerEmail: string, costUsd: number) {
     const store = await this.readStore();
-    const articleIndex = store.articles.findIndex((article) => article.id === id);
+    const articleIndex = store.articles.findIndex(
+      (article) => article.id === id && articleBelongsToOwner(article, ownerEmail),
+    );
 
     if (articleIndex === -1) {
       return null;
@@ -107,9 +125,11 @@ export class LocalJsonArticleRepository implements ArticleRepository {
     return updatedArticle;
   }
 
-  async deleteById(id: string) {
+  async deleteById(id: string, ownerEmail: string) {
     const store = await this.readStore();
-    const nextArticles = store.articles.filter((article) => article.id !== id);
+    const nextArticles = store.articles.filter(
+      (article) => article.id !== id || !articleBelongsToOwner(article, ownerEmail),
+    );
 
     if (nextArticles.length === store.articles.length) {
       return false;
@@ -152,6 +172,14 @@ export class LocalJsonArticleRepository implements ArticleRepository {
 
     await this.writeQueue;
   }
+}
+
+function articleBelongsToOwner(article: Article, ownerEmail: string) {
+  return (article as StoredArticle).ownerEmail === normalizeOwnerEmail(ownerEmail);
+}
+
+function normalizeOwnerEmail(ownerEmail: string) {
+  return ownerEmail.trim().toLowerCase();
 }
 
 function emptyStore(): ArticleStore {

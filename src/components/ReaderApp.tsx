@@ -4,7 +4,6 @@ import {
   BookOpen,
   FileText,
   Link as LinkIcon,
-  LogOut,
   Pause,
   Play,
   Plus,
@@ -16,6 +15,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import { AuthSignOutButton } from "@/components/AuthSignOutButton";
 import { annotateBlocks, type AnnotatedBlock, type SentenceSegment } from "@/lib/sentences";
 import type { Article, ArticleSummary, SourceType } from "@/lib/types";
 
@@ -42,8 +42,10 @@ type PendingImport = {
 
 type AuthStatusResponse = {
   enabled: boolean;
+  configured: boolean;
   authenticated: boolean;
-  username?: string;
+  authorized: boolean;
+  email?: string;
 };
 
 export function ReaderApp() {
@@ -538,12 +540,6 @@ export function ReaderApp() {
     }
   }
 
-  async function handleSignOut() {
-    stopSpeaking();
-    await fetch("/api/auth/logout", { method: "POST" });
-    window.location.assign("/login");
-  }
-
   const readableProgress = article ? progressRatio(article) : 0;
 
   return (
@@ -567,17 +563,7 @@ export function ReaderApp() {
             >
               <RefreshCw size={18} />
             </button>
-            {authStatus?.enabled ? (
-              <button
-                className="icon-button"
-                type="button"
-                title="Sign out"
-                aria-label="Sign out"
-                onClick={() => void handleSignOut()}
-              >
-                <LogOut size={18} />
-              </button>
-            ) : null}
+            {authStatus?.enabled ? <AuthSignOutButton onBeforeSignOut={stopSpeaking} /> : null}
           </div>
         </header>
 
@@ -1025,7 +1011,9 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     if (response.status === 401 && typeof window !== "undefined") {
       window.location.assign(
-        `/login?next=${encodeURIComponent(`${window.location.pathname}${window.location.search}`)}`,
+        `/sign-in?redirect_url=${encodeURIComponent(
+          `${window.location.pathname}${window.location.search}`,
+        )}`,
       );
     }
 

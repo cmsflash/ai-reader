@@ -4,6 +4,7 @@ import {
   getSavedArticle,
   updateSavedArticleProgress,
 } from "@/server/articles/articleService";
+import { requireAppUser } from "@/server/auth/access";
 
 export const runtime = "nodejs";
 
@@ -14,8 +15,14 @@ type RouteContext = {
 };
 
 export async function GET(_request: Request, context: RouteContext) {
+  const auth = await requireAppUser();
+
+  if (auth.response) {
+    return auth.response;
+  }
+
   const { id } = await context.params;
-  const article = await getSavedArticle(id);
+  const article = await getSavedArticle(id, auth.user.email);
 
   if (!article) {
     return NextResponse.json({ error: "Article not found." }, { status: 404 });
@@ -25,6 +32,12 @@ export async function GET(_request: Request, context: RouteContext) {
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
+  const auth = await requireAppUser();
+
+  if (auth.response) {
+    return auth.response;
+  }
+
   try {
     const { id } = await context.params;
     const body = (await request.json()) as {
@@ -34,7 +47,7 @@ export async function PATCH(request: Request, context: RouteContext) {
       };
     };
 
-    const result = await updateSavedArticleProgress(id, body.progress ?? {});
+    const result = await updateSavedArticleProgress(id, auth.user.email, body.progress ?? {});
 
     if (!result) {
       return NextResponse.json({ error: "Article not found." }, { status: 404 });
@@ -52,8 +65,14 @@ export async function PATCH(request: Request, context: RouteContext) {
 }
 
 export async function DELETE(_request: Request, context: RouteContext) {
+  const auth = await requireAppUser();
+
+  if (auth.response) {
+    return auth.response;
+  }
+
   const { id } = await context.params;
-  const deleted = await deleteSavedArticle(id);
+  const deleted = await deleteSavedArticle(id, auth.user.email);
 
   if (!deleted) {
     return NextResponse.json({ error: "Article not found." }, { status: 404 });

@@ -1,10 +1,17 @@
 import { NextResponse } from "next/server";
 import { imageFetchHeaders } from "@/server/artifacts/imageRequests";
+import { requireAppUserResponse } from "@/server/auth/access";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
 export async function GET(request: Request) {
+  const authError = await requireAppUserResponse();
+
+  if (authError) {
+    return authError;
+  }
+
   try {
     const requestUrl = new URL(request.url);
     const imageUrl = parseHttpUrl(requestUrl.searchParams.get("url"), "Image URL is required.");

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireAppUser } from "@/server/auth/access";
 import { getArticleRepository } from "@/server/runtime/articleRepository";
 import { getTtsProvider } from "@/server/runtime/ttsProvider";
 
@@ -8,6 +9,12 @@ export const maxDuration = 30;
 const maxTextLength = 1200;
 
 export async function POST(request: Request) {
+  const auth = await requireAppUser();
+
+  if (auth.response) {
+    return auth.response;
+  }
+
   try {
     const body = (await request.json()) as { text?: string; articleId?: string };
     const text = body.text?.replace(/\s+/g, " ").trim();
@@ -27,7 +34,7 @@ export async function POST(request: Request) {
     const costUsd = speech.costUsd ?? 0;
 
     if (body.articleId && costUsd > 0) {
-      await getArticleRepository().addProcessingCost(body.articleId, costUsd);
+      await getArticleRepository().addProcessingCost(body.articleId, auth.user.email, costUsd);
     }
 
     return new Response(speech.audio, {

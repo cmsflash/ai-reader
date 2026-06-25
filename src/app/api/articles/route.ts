@@ -4,21 +4,34 @@ import {
   importUrlArticle,
   listArticleSummaries,
 } from "@/server/articles/articleService";
+import { requireAppUser } from "@/server/auth/access";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function GET() {
-  const articles = await listArticleSummaries();
+  const auth = await requireAppUser();
+
+  if (auth.response) {
+    return auth.response;
+  }
+
+  const articles = await listArticleSummaries(auth.user.email);
   return NextResponse.json({ articles });
 }
 
 export async function POST(request: Request) {
+  const auth = await requireAppUser();
+
+  if (auth.response) {
+    return auth.response;
+  }
+
   try {
     const contentType = request.headers.get("content-type") ?? "";
     const result = contentType.includes("multipart/form-data")
-      ? await importFromForm(request)
-      : await importFromJson(request);
+      ? await importFromForm(request, auth.user.email)
+      : await importFromJson(request, auth.user.email);
 
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
@@ -31,17 +44,17 @@ export async function POST(request: Request) {
   }
 }
 
-async function importFromJson(request: Request) {
+async function importFromJson(request: Request, ownerEmail: string) {
   const body = (await request.json()) as { url?: string };
 
   if (!body.url) {
     throw new Error("URL is required.");
   }
 
-  return importUrlArticle(body.url);
+  return importUrlArticle(body.url, ownerEmail);
 }
 
-async function importFromForm(request: Request) {
+async function importFromForm(request: Request, ownerEmail: string) {
   const form = await request.formData();
   const file = form.get("file");
 
@@ -49,5 +62,5 @@ async function importFromForm(request: Request) {
     throw new Error("File is required.");
   }
 
-  return importFileArticle(file);
+  return importFileArticle(file, ownerEmail);
 }

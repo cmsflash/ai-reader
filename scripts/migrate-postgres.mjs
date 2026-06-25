@@ -19,6 +19,15 @@ const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sq
 for (const file of files) {
   const migration = await readFile(path.join(migrationsDir, file), "utf8");
   process.stdout.write(`Applying ${file}... `);
-  await sql.unsafe(migration);
+  for (const statement of splitStatements(migration)) {
+    await sql.query(statement);
+  }
   process.stdout.write("done\n");
+}
+
+function splitStatements(sqlText) {
+  return sqlText
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter(Boolean);
 }

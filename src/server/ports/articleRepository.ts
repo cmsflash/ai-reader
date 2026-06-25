@@ -3,12 +3,16 @@ import type { Article, ArticleSummary, ReadingProgress } from "@/lib/types";
 export type ArticleProgressPatch = Partial<Pick<ReadingProgress, "percent" | "sentenceIndex">>;
 
 export interface ArticleRepository {
-  list(): Promise<ArticleSummary[]>;
-  findById(id: string): Promise<Article | null>;
-  create(article: Article): Promise<Article>;
-  updateProgress(id: string, progress: ArticleProgressPatch): Promise<Article | null>;
-  addProcessingCost(id: string, costUsd: number): Promise<Article | null>;
-  deleteById(id: string): Promise<boolean>;
+  list(ownerEmail: string): Promise<ArticleSummary[]>;
+  findById(id: string, ownerEmail: string): Promise<Article | null>;
+  create(article: Article, ownerEmail: string): Promise<Article>;
+  updateProgress(
+    id: string,
+    ownerEmail: string,
+    progress: ArticleProgressPatch,
+  ): Promise<Article | null>;
+  addProcessingCost(id: string, ownerEmail: string, costUsd: number): Promise<Article | null>;
+  deleteById(id: string, ownerEmail: string): Promise<boolean>;
 }
 
 export function toArticleSummary(article: Article): ArticleSummary {

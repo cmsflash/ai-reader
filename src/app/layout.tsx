@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+import { ClerkProvider } from "@clerk/nextjs";
+import { isClerkConfigured } from "@/server/auth/config";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -11,9 +13,11 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const body = isClerkConfigured() ? <ClerkProvider>{children}</ClerkProvider> : children;
+
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>{body}</body>
     </html>
   );
 }

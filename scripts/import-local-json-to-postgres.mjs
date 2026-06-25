@@ -13,9 +13,15 @@ if (!databaseUrl) {
 
 const storePath = process.argv[2] || process.env.LOCAL_ARTICLE_STORE_PATH || "data/articles.json";
 const store = JSON.parse(await readFile(storePath, "utf8"));
+const ownerEmail = ownerEmailForImport();
 
 if (store.version !== 1 || !Array.isArray(store.articles)) {
   console.error(`${storePath} is not an AI Reader article store.`);
+  process.exit(1);
+}
+
+if (!ownerEmail) {
+  console.error("AI_READER_IMPORT_OWNER_EMAIL or AI_READER_ALLOWED_EMAILS is required for import.");
   process.exit(1);
 }
 
@@ -26,6 +32,7 @@ for (const article of store.articles) {
     `
       INSERT INTO articles (
         id,
+        owner_email,
         title,
         source_type,
         source_url,
@@ -42,8 +49,9 @@ for (const article of store.articles) {
         text_content,
         blocks
       )
-      VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7, $8, $9, $10, $11, $12, $13::timestamptz, $14, $15, $16::jsonb)
+      VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8, $9, $10, $11, $12, $13, $14::timestamptz, $15, $16, $17::jsonb)
       ON CONFLICT (id) DO UPDATE SET
+        owner_email = EXCLUDED.owner_email,
         title = EXCLUDED.title,
         source_type = EXCLUDED.source_type,
         source_url = EXCLUDED.source_url,
@@ -62,6 +70,7 @@ for (const article of store.articles) {
     `,
     [
       article.id,
+      ownerEmail,
       article.title,
       article.sourceType,
       article.sourceUrl ?? null,
@@ -82,3 +91,11 @@ for (const article of store.articles) {
 }
 
 console.log(`Imported ${store.articles.length} articles from ${storePath}.`);
+
+function ownerEmailForImport() {
+  return (
+    process.env.AI_READER_IMPORT_OWNER_EMAIL?.trim().toLowerCase() ||
+    process.env.AI_READER_ALLOWED_EMAILS?.split(",")[0]?.trim().toLowerCase() ||
+    ""
+  );
+}
