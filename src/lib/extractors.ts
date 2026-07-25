@@ -6,8 +6,10 @@ import mammoth from "mammoth";
 import { marked } from "marked";
 import pdfParse from "pdf-parse";
 import sanitizeHtml from "sanitize-html";
+import { fetchPublicResource } from "@/server/security/publicArticleUrl";
 import { annotateBlocks } from "./sentences";
 import type { Article, ArticleBlock, SourceType } from "./types";
+import { decodeVoiceDocument } from "./voiceDocuments";
 
 type ExtractedArticle = {
   title: string;
@@ -108,8 +110,8 @@ const allowedAttributes = {
 };
 
 export async function articleFromUrl(rawUrl: string): Promise<Article> {
-  const url = normalizeUrl(rawUrl);
-  const response = await fetch(url.href, {
+  const initialUrl = normalizeUrl(rawUrl);
+  const { response, url } = await fetchPublicResource(initialUrl.href, {
     headers: articleRequestHeaders,
   });
 
@@ -133,10 +135,53 @@ export async function articleFromUrl(rawUrl: string): Promise<Article> {
   return buildArticle(await extractReadableHtml(raw, url.href));
 }
 
+export async function articleFromHtml(
+  rawHtml: string,
+  options: {
+    title?: string;
+    sourceUrl?: string;
+  } = {},
+): Promise<Article> {
+  const sourceUrl = optionalPublicUrl(options.sourceUrl);
+  const parsingUrl = sourceUrl ?? "https://import.ai-reader.invalid/article";
+  const extracted = await extractReadableHtml(rawHtml, parsingUrl);
+
+  return buildArticle({
+    ...extracted,
+    title: options.title?.trim() || extracted.title,
+    sourceType: sourceUrl ? "url" : "text",
+    sourceUrl,
+  });
+}
+
 export async function articleFromFile(file: File): Promise<Article> {
   const buffer = Buffer.from(await file.arrayBuffer());
   const fileName = file.name || "Untitled";
   const extension = fileName.split(".").pop()?.toLowerCase() ?? "";
+
+  if (
+    fileName.toLowerCase().endsWith(".mhtml.zip") ||
+    extension === "mhtml" ||
+    extension === "mht"
+  ) {
+    const decoded = decodeVoiceDocument(buffer, fileName);
+    return articleFromHtml(decoded.html, {
+      title: decoded.title ?? stripVoiceExtension(fileName),
+      sourceUrl: decoded.sourceUrl,
+    });
+  }
+
+  if (extension === "html" || extension === "htm") {
+    const html = buffer.toString("utf8");
+    return articleFromHtml(html, {
+      title: stripExtension(fileName),
+      sourceUrl: hyperionicsSourceUrl(html),
+    });
+  }
+
+  if (extension === "url") {
+    return articleFromUrl(urlFromInternetShortcut(buffer.toString("utf8")));
+  }
 
   if (extension === "pdf" || file.type === "application/pdf") {
     return buildArticle(await extractPdf(buffer, stripExtension(fileName)));
@@ -157,7 +202,9 @@ export async function articleFromFile(file: File): Promise<Article> {
     return buildArticle(extractPlainText(buffer.toString("utf8"), stripExtension(fileName), "text"));
   }
 
-  throw new Error("Unsupported file type. Import PDF, DOCX, Markdown, or text files.");
+  throw new Error(
+    "Unsupported file type. Import URL, HTML, MHTML, MHTML.ZIP, PDF, DOCX, Markdown, or text files.",
+  );
 }
 
 function buildArticle(extracted: ExtractedArticle): Article {
@@ -186,6 +233,43 @@ function buildArticle(extracted: ExtractedArticle): Article {
     textContent,
     blocks: extracted.blocks,
   };
+}
+
+function optionalPublicUrl(rawUrl?: string) {
+  if (!rawUrl) {
+    return undefined;
+  }
+
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function hyperionicsSourceUrl(html: string) {
+  const match =
+    /<!--\s*Hyperionics-(?:OriginHtml|LdAsIsHtml)\s+([\s\S]*?)\s*-->/i.exec(
+      html,
+    );
+  return optionalPublicUrl(match?.[1]?.trim());
+}
+
+function urlFromInternetShortcut(raw: string) {
+  const match = /^\s*URL\s*=\s*(https?:\/\/\S+)\s*$/im.exec(raw);
+
+  if (!match) {
+    throw new Error("The @Voice URL file does not contain an HTTP or HTTPS URL.");
+  }
+
+  return match[1].trim();
+}
+
+function stripVoiceExtension(fileName: string) {
+  return fileName.replace(/\.mhtml(?:\.zip)?$/i, "") || "Untitled";
 }
 
 async function extractReadableHtml(rawHtml: string, sourceUrl: string): Promise<ExtractedArticle> {

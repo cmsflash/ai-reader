@@ -1,4 +1,8 @@
-import { articleFromFile, articleFromUrl } from "@/lib/extractors";
+import {
+  articleFromFile,
+  articleFromHtml,
+  articleFromUrl,
+} from "@/lib/extractors";
 import {
   archiveArticleArtifacts,
   deleteArticleArtifacts,
@@ -15,8 +19,19 @@ export async function getSavedArticle(id: string, ownerEmail: string) {
   return getArticleRepository().findById(id, ownerEmail);
 }
 
-export async function importUrlArticle(url: string, ownerEmail: string) {
-  const article = await archiveArticleArtifacts(await articleFromUrl(url));
+export async function importUrlArticle(
+  url: string,
+  ownerEmail: string,
+  options: {
+    title?: string;
+  } = {},
+) {
+  const extracted = await articleFromUrl(url);
+  const article = await archiveArticleArtifacts(
+    options.title && extracted.title === "Untitled"
+      ? { ...extracted, title: options.title }
+      : extracted,
+  );
   const saved = await getArticleRepository().create(article, ownerEmail);
 
   return {
@@ -26,7 +41,45 @@ export async function importUrlArticle(url: string, ownerEmail: string) {
 }
 
 export async function importFileArticle(file: File, ownerEmail: string) {
-  const article = await articleFromFile(file);
+  const article = await archiveArticleArtifacts(await articleFromFile(file));
+  const saved = await getArticleRepository().create(article, ownerEmail);
+
+  return {
+    article: saved,
+    summary: toArticleSummary(saved),
+  };
+}
+
+export async function importHtmlArticle(
+  html: string,
+  ownerEmail: string,
+  options: {
+    title?: string;
+    sourceUrl?: string;
+    progress?: number;
+  } = {},
+) {
+  let article = await archiveArticleArtifacts(
+    await articleFromHtml(html, {
+      title: options.title,
+      sourceUrl: options.sourceUrl,
+    }),
+  );
+
+  if (typeof options.progress === "number" && Number.isFinite(options.progress)) {
+    const percent = Math.min(Math.max(options.progress, 0), 1);
+    article = {
+      ...article,
+      progress: {
+        sentenceIndex: Math.round(
+          percent * Math.max(article.sentenceCount - 1, 0),
+        ),
+        percent,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+  }
+
   const saved = await getArticleRepository().create(article, ownerEmail);
 
   return {

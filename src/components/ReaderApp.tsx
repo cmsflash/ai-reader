@@ -2,6 +2,8 @@
 
 import {
   BookOpen,
+  CloudDownload,
+  Download,
   FileText,
   Link as LinkIcon,
   Pause,
@@ -9,6 +11,7 @@ import {
   Plus,
   RefreshCw,
   Settings2,
+  Share2,
   Trash2,
   Upload,
   Volume2,
@@ -48,6 +51,43 @@ type AuthStatusResponse = {
   email?: string;
 };
 
+type IntegrationFolder = {
+  id?: string | number;
+  folderId?: string | number;
+  folder_id?: string | number;
+  title?: string;
+  displayTitle?: string;
+  display_title?: string;
+  count?: number;
+};
+
+type IntegrationProviderStatus = {
+  configured?: boolean;
+  connected?: boolean;
+  username?: string;
+  account?: string;
+  folder?: string;
+  folders?: IntegrationFolder[];
+  message?: string;
+};
+
+type IntegrationStatusResponse = {
+  instapaper?: IntegrationProviderStatus;
+  dropbox?: IntegrationProviderStatus;
+};
+
+type IntegrationSyncResponse = {
+  imported: number;
+  failed: number;
+  skipped: number;
+  remaining: number;
+  message?: string;
+};
+
+type IntegrationProvider = "instapaper" | "dropbox";
+
+const integrationBatchSize = 5;
+
 export function ReaderApp() {
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [pendingImports, setPendingImports] = useState<PendingImport[]>([]);
@@ -62,6 +102,13 @@ export function ReaderApp() {
   const [currentSentence, setCurrentSentence] = useState(0);
   const [rate, setRate] = useState(1);
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
+  const [integrationStatus, setIntegrationStatus] =
+    useState<IntegrationStatusResponse | null>(null);
+  const [integrationStatusError, setIntegrationStatusError] = useState<string | null>(null);
+  const [integrationNotice, setIntegrationNotice] = useState<string | null>(null);
+  const [instapaperFolder, setInstapaperFolder] = useState("unread");
+  const [syncingIntegration, setSyncingIntegration] =
+    useState<IntegrationProvider | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const articleIdRef = useRef<string | null>(null);
@@ -129,6 +176,16 @@ export function ReaderApp() {
     }
   }, []);
 
+  const loadIntegrationStatus = useCallback(async () => {
+    try {
+      const data = await requestJson<IntegrationStatusResponse>("/api/integrations/status");
+      setIntegrationStatus(data);
+      setIntegrationStatusError(null);
+    } catch (loadError) {
+      setIntegrationStatusError(messageFromError(loadError));
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -159,6 +216,10 @@ export function ReaderApp() {
 
     return () => window.clearInterval(interval);
   }, [loadArticles]);
+
+  useEffect(() => {
+    void loadIntegrationStatus();
+  }, [loadIntegrationStatus]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -512,6 +573,42 @@ export function ReaderApp() {
     }
   }
 
+  async function handleIntegrationSync(provider: IntegrationProvider) {
+    setSyncingIntegration(provider);
+    setIntegrationNotice(
+      provider === "instapaper" ? "Syncing Instapaper…" : "Syncing @Voice from Dropbox…",
+    );
+
+    try {
+      const endpoint =
+        provider === "instapaper"
+          ? "/api/integrations/instapaper/sync"
+          : "/api/integrations/dropbox/sync";
+      const body =
+        provider === "instapaper"
+          ? { folder: instapaperFolder, batchSize: integrationBatchSize }
+          : { batchSize: integrationBatchSize };
+      const result = await requestJson<IntegrationSyncResponse>(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+
+      setIntegrationNotice(integrationSyncMessage(provider, result));
+      await Promise.all([loadArticles(false), loadIntegrationStatus()]);
+    } catch (syncError) {
+      setIntegrationNotice(
+        `${provider === "instapaper" ? "Instapaper" : "@Voice"} sync failed: ${messageFromError(
+          syncError,
+        )}`,
+      );
+    } finally {
+      setSyncingIntegration(null);
+    }
+  }
+
   async function handleDeleteArticle() {
     if (!selectedId) {
       return;
@@ -541,6 +638,11 @@ export function ReaderApp() {
   }
 
   const readableProgress = article ? progressRatio(article) : 0;
+  const instapaperStatus = integrationStatus?.instapaper;
+  const dropboxStatus = integrationStatus?.dropbox;
+  const instapaperReady = integrationProviderReady(instapaperStatus);
+  const dropboxReady = integrationProviderReady(dropboxStatus);
+  const instapaperFolders = integrationFolderOptions(instapaperStatus?.folders);
 
   return (
     <main className="reader-app">
@@ -588,7 +690,7 @@ export function ReaderApp() {
           ref={fileInputRef}
           className="visually-hidden"
           type="file"
-          accept=".pdf,.docx,.md,.markdown,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain"
+          accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm,.mhtml,.mht,.mhtml.zip,.url,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain,text/html,application/xhtml+xml,message/rfc822,application/x-mimearchive,application/zip,application/internet-shortcut"
           onChange={(event) => void handleFileUpload(event.target.files?.[0])}
         />
 
@@ -601,6 +703,116 @@ export function ReaderApp() {
           <Upload size={18} />
           Upload document
         </button>
+
+        <details className="settings-panel integrations-panel">
+          <summary>
+            <CloudDownload size={17} />
+            Imports &amp; sharing
+          </summary>
+
+          <div className="integration-stack">
+            <section className="integration-card" aria-labelledby="instapaper-integration-title">
+              <div className="integration-card-header">
+                <div>
+                  <h3 id="instapaper-integration-title">Instapaper</h3>
+                  <p>{integrationProviderLabel(instapaperStatus, integrationStatusError)}</p>
+                </div>
+                <span className={instapaperReady ? "integration-badge ready" : "integration-badge"}>
+                  {integrationProviderBadgeLabel(instapaperStatus, integrationStatusError)}
+                </span>
+              </div>
+
+              <div className="integration-controls">
+                <label>
+                  Folder
+                  <select
+                    value={instapaperFolder}
+                    disabled={!instapaperReady || syncingIntegration !== null}
+                    onChange={(event) => setInstapaperFolder(event.target.value)}
+                  >
+                    {instapaperFolders.map((folder) => (
+                      <option key={folder.id} value={folder.id}>
+                        {folder.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="integration-sync-button"
+                  type="button"
+                  disabled={!instapaperReady || syncingIntegration !== null}
+                  onClick={() => void handleIntegrationSync("instapaper")}
+                >
+                  <RefreshCw
+                    className={syncingIntegration === "instapaper" ? "spin" : undefined}
+                    size={15}
+                  />
+                  Sync
+                </button>
+              </div>
+            </section>
+
+            <section className="integration-card" aria-labelledby="dropbox-integration-title">
+              <div className="integration-card-header">
+                <div>
+                  <h3 id="dropbox-integration-title">@Voice Reader</h3>
+                  <p>{integrationProviderLabel(dropboxStatus, integrationStatusError)}</p>
+                </div>
+                <span className={dropboxReady ? "integration-badge ready" : "integration-badge"}>
+                  {integrationProviderBadgeLabel(dropboxStatus, integrationStatusError)}
+                </span>
+              </div>
+
+              <div className="integration-dropbox-row">
+                <span>{dropboxStatus?.folder || "/Apps/@Voice"}</span>
+                <button
+                  className="integration-sync-button"
+                  type="button"
+                  disabled={!dropboxReady || syncingIntegration !== null}
+                  onClick={() => void handleIntegrationSync("dropbox")}
+                >
+                  <RefreshCw
+                    className={syncingIntegration === "dropbox" ? "spin" : undefined}
+                    size={15}
+                  />
+                  Sync
+                </button>
+              </div>
+            </section>
+
+            <section className="integration-help" aria-labelledby="share-import-title">
+              <div className="integration-help-title">
+                <Share2 size={16} />
+                <h3 id="share-import-title">Quick save</h3>
+              </div>
+              <p>
+                Install AI Reader on Android to add it to the Share sheet. On iPhone or iPad, use
+                the AI Reader Share Sheet shortcut.
+              </p>
+              <a
+                className="integration-download-link"
+                href="/ai-reader-chrome-extension.zip"
+                download
+              >
+                <Download size={15} />
+                Download Chrome extension
+              </a>
+            </section>
+
+            {(integrationNotice || integrationStatusError) && (
+              <p
+                className={
+                  !integrationNotice && integrationStatusError
+                    ? "integration-message error"
+                    : "integration-message"
+                }
+                role="status"
+              >
+                {integrationNotice ?? `Integration status unavailable: ${integrationStatusError}`}
+              </p>
+            )}
+          </div>
+        </details>
 
         <details className="settings-panel">
           <summary>
@@ -1002,6 +1214,79 @@ function SentenceChunks({
       {index < chunks.length - 1 ? " " : ""}
     </span>
   ));
+}
+
+function integrationProviderReady(status?: IntegrationProviderStatus) {
+  return (
+    status?.configured === true &&
+    status.connected !== false &&
+    !status.message
+  );
+}
+
+function integrationProviderBadgeLabel(
+  status: IntegrationProviderStatus | undefined,
+  statusError: string | null,
+) {
+  if (!status && !statusError) {
+    return "Checking";
+  }
+
+  return integrationProviderReady(status) ? "Ready" : "Setup";
+}
+
+function integrationProviderLabel(
+  status: IntegrationProviderStatus | undefined,
+  statusError: string | null,
+) {
+  if (!status) {
+    return statusError ? "Status unavailable" : "Checking connection…";
+  }
+
+  if (integrationProviderReady(status)) {
+    return status.username || status.account || status.message || "Connected";
+  }
+
+  return status.message || "Credentials required";
+}
+
+function integrationFolderOptions(folders: IntegrationFolder[] | undefined) {
+  const options = new Map<string, string>([
+    ["unread", "Unread"],
+    ["starred", "Starred"],
+    ["archive", "Archive"],
+  ]);
+
+  for (const folder of folders ?? []) {
+    const rawId = folder.id ?? folder.folderId ?? folder.folder_id;
+
+    if (rawId === undefined || rawId === null) {
+      continue;
+    }
+
+    const id = String(rawId);
+    const title =
+      folder.displayTitle || folder.display_title || folder.title || `Folder ${String(rawId)}`;
+    const label =
+      typeof folder.count === "number" && folder.count >= 0 ? `${title} (${folder.count})` : title;
+    options.set(id, label);
+  }
+
+  return Array.from(options, ([id, label]) => ({ id, label }));
+}
+
+function integrationSyncMessage(
+  provider: IntegrationProvider,
+  result: IntegrationSyncResponse,
+) {
+  if (result.message) {
+    return result.message;
+  }
+
+  const name = provider === "instapaper" ? "Instapaper" : "@Voice";
+  const remaining = result.remaining > 0 ? ` · ${result.remaining} remaining` : "";
+
+  return `${name}: ${result.imported} imported · ${result.skipped} skipped · ${result.failed} failed${remaining}`;
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {

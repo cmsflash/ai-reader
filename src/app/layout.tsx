@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
 import { isClerkConfigured } from "@/server/auth/config";
+import { PwaRegistration } from "@/components/PwaRegistration";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -17,7 +18,10 @@ export default function RootLayout({
 
   return (
     <html lang="en">
-      <body>{body}</body>
+      <body>
+        {body}
+        <PwaRegistration />
+      </body>
     </html>
   );
 }

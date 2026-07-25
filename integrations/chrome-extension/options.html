@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Reader extension settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="icons/icon48.png" width="48" height="48" alt="" />
+        <div>
+          <h1>AI Reader</h1>
+          <p>Chrome extension settings</p>
+        </div>
+      </header>
+
+      <form id="settings-form">
+        <label for="base-url">AI Reader URL</label>
+        <input
+          id="base-url"
+          name="base-url"
+          type="url"
+          inputmode="url"
+          placeholder="https://reader.example.com"
+          required
+        />
+        <p class="help">Enter the deployment origin only, without a path.</p>
+
+        <label for="import-token">Personal import token <span>optional</span></label>
+        <div class="token-row">
+          <input
+            id="import-token"
+            name="import-token"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Paste a scoped AI Reader import token"
+          />
+          <button id="toggle-token" class="secondary compact" type="button">Show</button>
+        </div>
+        <p class="help">
+          With a token, the extension saves in the background. Without one, it opens AI Reader’s
+          signed-in share page.
+        </p>
+
+        <button class="primary" type="submit">Save settings</button>
+        <p id="status" role="status" aria-live="polite"></p>
+      </form>
+
+      <section aria-labelledby="shortcut-heading">
+        <h2 id="shortcut-heading">Keyboard shortcut</h2>
+        <p>
+          Current shortcut:
+          <strong id="shortcut-value">Loading…</strong>
+        </p>
+        <button id="open-shortcuts" class="secondary" type="button">
+          Change Chrome shortcut
+        </button>
+      </section>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>

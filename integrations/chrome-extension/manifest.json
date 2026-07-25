@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "AI Reader",
+  "description": "Save the current article to your personal AI Reader.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "109",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "tabGroups",
+    "storage",
+    "notifications"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Save to AI Reader",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "commands": {
+    "save-current-page": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "Save the current page to AI Reader"
+    }
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

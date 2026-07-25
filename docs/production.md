@@ -10,6 +10,8 @@ Create or connect these services in the Vercel project:
 - Vercel Blob, which provides `BLOB_READ_WRITE_TOKEN`
 - Clerk, which provides `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY`
 - ElevenLabs, using the existing `ELEVENLABS_*` variables
+- An Owner Only Instapaper Full API application
+- A scoped Dropbox API application with Full Dropbox access
 
 ## Environment
 
@@ -27,6 +29,15 @@ NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
 NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL=/
 NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL=/
 AI_READER_ALLOWED_EMAILS=you@example.com
+AI_READER_IMPORT_TOKEN=...
+AI_READER_IMPORT_OWNER_EMAIL=you@example.com
+INSTAPAPER_CONSUMER_KEY=...
+INSTAPAPER_CONSUMER_SECRET=...
+INSTAPAPER_ACCESS_TOKEN=...
+INSTAPAPER_ACCESS_TOKEN_SECRET=...
+DROPBOX_APP_KEY=...
+DROPBOX_APP_SECRET=...
+DROPBOX_REFRESH_TOKEN=...
 ELEVENLABS_API_KEY=...
 ELEVENLABS_VOICE_ID=JBFqnCBsd6RMkjVDRZzb
 ELEVENLABS_MODEL_ID=eleven_multilingual_v2
@@ -36,6 +47,197 @@ ELEVENLABS_COST_PER_1K_CHARS_USD=0
 If Clerk keys are empty in production, the app shows a setup-required page and blocks the API.
 Enable Google sign-in and any passkey options in Clerk. Keep `AI_READER_ALLOWED_EMAILS` set
 for a personal deployment so arbitrary Google accounts cannot spend import or TTS budget.
+
+`AI_READER_IMPORT_TOKEN` is a separate bearer token for personal import clients such as the Chrome
+extension or an optional direct iOS Shortcut. Generate a high-entropy value, for example with
+`openssl rand -hex 32`, and never use a `NEXT_PUBLIC_` variable for it. Set
+`AI_READER_IMPORT_OWNER_EMAIL` explicitly to the allowed account that owns imported articles.
+The browser-opening iOS Shortcut described below uses the signed-in web session and does not need
+the bearer token.
+
+## Instapaper
+
+1. Sign into the Instapaper account whose library will be imported and
+   [register an application](https://www.instapaper.com/developers/applications/create).
+2. Use a neutral title such as **AI Reader**, the deployed application URL, and the operator's
+   contact email. Leave the application in **Owner Only** mode; review is unnecessary when the
+   app developer and authenticated API user are the same person.
+3. Copy the consumer key and one-time-displayed consumer secret into
+   `INSTAPAPER_CONSUMER_KEY` and `INSTAPAPER_CONSUMER_SECRET`.
+4. Use an OAuth 1.0a client with HMAC-SHA1 to sign this xAuth request:
+
+   ```text
+   POST https://www.instapaper.com/api/1/oauth/access_token
+   Content-Type: application/x-www-form-urlencoded
+
+   x_auth_username=EMAIL_OR_USERNAME
+   x_auth_password=INSTAPAPER_PASSWORD_OR_EMPTY
+   x_auth_mode=client_auth
+   ```
+
+   OAuth parameters belong in the `Authorization` header, and the three form fields must be part
+   of the signature. Instapaper returns:
+
+   ```text
+   oauth_token=...&oauth_token_secret=...
+   ```
+
+5. Store those two values as `INSTAPAPER_ACCESS_TOKEN` and
+   `INSTAPAPER_ACCESS_TOKEN_SECRET`. Discard the username and password immediately.
+
+Instapaper's API does not exchange a Google token. If the account uses a Gmail address and has no
+Instapaper password, keep the required `x_auth_password` field present but empty; Instapaper's
+account conventions explicitly support passwordless accounts. If xAuth rejects it, set or reset an
+Instapaper-specific password and use it only for the token exchange. The personal Owner Only
+configuration can call `bookmarks/get_text` without an Instaparser key.
+
+References:
+
+- [Instapaper Full API authentication](https://www.instapaper.com/developers/v1/full-api/authentication)
+- [Instapaper account conventions](https://www.instapaper.com/developers/overview/accounts-and-conventions)
+- [Instapaper Bookmark API](https://www.instapaper.com/developers/v1/full-api/bookmark-api)
+- [Instapaper API terms](https://www.instapaper.com/developers/overview/api-terms)
+
+## Dropbox and @Voice Reader
+
+@Voice writes its synchronized files under `/Apps/@Voice`. That folder belongs to @Voice, not to
+AI Reader's Dropbox app sandbox, so create a [scoped Dropbox
+app](https://www.dropbox.com/developers/apps/create) with **Full Dropbox** access. In the app's
+Permissions tab, enable only:
+
+- `files.metadata.read` for recursive folder listing
+- `files.content.read` for downloading selected files
+
+Do not enable write, sharing, account, or team scopes. Full Dropbox chooses which existing paths
+the app can address; the two read scopes constrain what it can do there. Dropbox explains the
+[App folder versus Full Dropbox access
+model](https://www.dropbox.com/developers/reference/developer-guide) and scoped permissions in its
+[Getting Started guide](https://www.dropbox.com/developers/reference/getting-started).
+
+Copy the app key and secret into `DROPBOX_APP_KEY` and `DROPBOX_APP_SECRET`, then obtain an offline
+refresh token:
+
+1. Open the following URL with the real app key substituted:
+
+   ```text
+   https://www.dropbox.com/oauth2/authorize?client_id=APP_KEY&response_type=code&token_access_type=offline
+   ```
+
+2. Approve the app and copy the displayed authorization code.
+3. Exchange the code using HTTP Basic authentication:
+
+   ```bash
+   curl --request POST https://api.dropboxapi.com/oauth2/token \
+     --user 'APP_KEY:APP_SECRET' \
+     --data-urlencode 'code=AUTHORIZATION_CODE' \
+     --data-urlencode 'grant_type=authorization_code'
+   ```
+
+4. Store the returned `refresh_token` as `DROPBOX_REFRESH_TOKEN`. AI Reader exchanges it
+   server-side for short-lived access tokens and refreshes them before expiry.
+
+The authorization URL must include `token_access_type=offline`; otherwise Dropbox does not return
+a refresh token. If scopes change later, repeat authorization so the token receives the updated
+grants. See Dropbox's official [OAuth
+Guide](https://developers.dropbox.com/oauth-guide) and [HTTP API
+reference](https://www.dropbox.com/developers/documentation/http/documentation).
+
+The sync reads supported @Voice exports recursively from `/Apps/@Voice`, including
+`.mhtml.zip`, MHTML, HTML, URL shortcuts, PDF, DOCX, Markdown, and text files. It never writes to or
+deletes from Dropbox.
+
+## Personal import clients
+
+The token-authenticated endpoint is:
+
+```http
+POST /api/import
+Authorization: Bearer AI_READER_IMPORT_TOKEN
+Content-Type: application/json
+Idempotency-Key: UNIQUE_REQUEST_ID
+
+{"url":"https://example.com/article","title":"Optional title","source":"chrome-extension"}
+```
+
+Accepted source values are `api`, `android-share`, `chrome-extension`, and `ios-shortcut`.
+`AI_READER_IMPORT_OWNER_EMAIL` determines article ownership. Keep the token out of URLs, logs,
+screenshots, source control, and shared Shortcuts.
+
+### Package and install the Chrome extension
+
+Validate and package the Manifest V3 extension from the repository root:
+
+```bash
+node --check integrations/chrome-extension/service-worker.js
+node --check integrations/chrome-extension/options.js
+node integrations/chrome-extension/scripts/validate.mjs
+(
+  cd integrations/chrome-extension
+  zip -FSr ../../public/ai-reader-chrome-extension.zip \
+    manifest.json service-worker.js options.html options.css options.js icons
+)
+unzip -l public/ai-reader-chrome-extension.zip
+```
+
+After deployment, download the ZIP from the app's **Integrations** panel or directly from:
+
+```text
+https://YOUR_AI_READER_ORIGIN/ai-reader-chrome-extension.zip
+```
+
+Unzip it, open `chrome://extensions` in Chrome, enable **Developer mode**, choose **Load
+unpacked**, and select the extracted folder containing `manifest.json`. In the extension settings:
+
+1. Enter the deployed AI Reader origin.
+2. Paste `AI_READER_IMPORT_TOKEN`.
+3. Grant the requested host access to that origin.
+4. Test the toolbar button.
+5. Confirm or assign `Command+Shift+Y` on macOS (`Ctrl+Shift+Y` elsewhere) at
+   `chrome://extensions/shortcuts`.
+
+Without a token, the extension safely falls back to opening `/share?url=...` and uses the existing
+signed-in browser session. Tabs opened by the extension stay in the current tab group or a blue
+**AI Reader** group. See Chrome's [unpacked-extension
+instructions](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world#load-unpacked)
+and [Commands API](https://developer.chrome.com/docs/extensions/reference/api/commands).
+
+### Install the Android share target
+
+1. Open the deployed HTTPS origin in Chrome for Android and sign in.
+2. Use Chrome's menu to choose **Install app** or **Add to Home screen**.
+3. Launch the installed AI Reader once.
+4. In a browser or another Android app, share an HTTP(S) article and choose **AI Reader**.
+
+Android only exposes web share targets after the PWA is installed. If AI Reader was installed
+before share support was deployed and does not appear, remove it and install it again. Shared URLs
+are routed through `/api/share-target` to `/share` and imported using the signed-in app session.
+See Chrome's [Web Share Target
+documentation](https://developer.chrome.com/docs/capabilities/web-apis/web-share-target).
+
+### Create the iOS Share Sheet Shortcut
+
+1. In Shortcuts on iPhone or iPad, create a shortcut named **Save to AI Reader**.
+2. In Details, enable **Show in Share Sheet** and limit accepted input to **URLs** and
+   **Safari web pages**.
+3. Percent-encode the Shortcut Input.
+4. Build this URL with the encoded value:
+
+   ```text
+   https://YOUR_AI_READER_ORIGIN/share?url=ENCODED_SHORTCUT_INPUT&source=ios-shortcut
+   ```
+
+5. Add **Open URLs** as the final action.
+6. Keep Safari signed into the same AI Reader origin, then test from Safari's Share Sheet.
+
+Opening `/share` avoids embedding the personal bearer token in a shareable Shortcut. For an
+unattended direct-import Shortcut, call `/api/import` with `source: "ios-shortcut"` and the bearer
+token, but treat that Shortcut as a credential and never share it. Apple documents how to
+[enable a Shortcut in the Share
+Sheet](https://support.apple.com/guide/shortcuts/launch-a-shortcut-from-another-app-apd163eb9f95/ios),
+choose [Shortcut input
+types](https://support.apple.com/guide/shortcuts/understanding-input-types-apd7644168e1/ios), and
+use actions such as [Open
+URLs](https://support.apple.com/guide/shortcuts/about-share-actions-apdaf74d75a5/ios).
 
 ## Database
 

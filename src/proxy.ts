@@ -7,6 +7,8 @@ const isPublicRoute = createRouteMatcher([
   "/sign-up(.*)",
   "/auth/setup(.*)",
   "/api/auth/me",
+  "/api/import(.*)",
+  "/api/share-target",
 ]);
 
 const isApiRoute = createRouteMatcher(["/api(.*)"]);
