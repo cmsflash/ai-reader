@@ -1,17 +1,22 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { after, NextResponse } from "next/server";
-import { importUrlArticle } from "@/server/articles/articleService";
+import {
+  getSavedArticle,
+  importUrlArticle,
+} from "@/server/articles/articleService";
 import {
   importTokenConfigured,
   requireImportToken,
 } from "@/server/auth/importToken";
 import { hasProductionDatabase } from "@/server/database";
 import {
+  articleIdForImport,
+  claimImport,
   findImportRecord,
-  markImportCompleted,
+  markImportCompletedReconciled,
   markImportFailed,
-  markImportPending,
 } from "@/server/integrations/importRecords";
+import { extensionCorsHeaders } from "@/server/security/extensionCors";
 import { validatePublicArticleUrl } from "@/server/security/publicArticleUrl";
 
 export const runtime = "nodejs";
@@ -43,37 +48,106 @@ export async function POST(request: Request) {
     );
   }
 
+  let body: {
+    url?: string;
+    title?: string;
+    source?: string;
+  };
+
   try {
-    const body = (await request.json()) as {
+    body = (await request.json()) as {
       url?: string;
       title?: string;
       source?: string;
     };
-    const url = await validatePublicArticleUrl(body.url ?? "");
-    const provider = allowedSources.has(body.source ?? "")
-      ? body.source ?? "api"
-      : "api";
-    const externalId =
-      request.headers.get("idempotency-key")?.trim().slice(0, 200) || randomUUID();
-    const existing = await findImportRecord(user.email, provider, externalId);
+  } catch {
+    return NextResponse.json(
+      { error: "Request body must be valid JSON." },
+      { status: 400, headers: corsHeaders },
+    );
+  }
 
-    if (existing && existing.status !== "failed") {
+  let url: URL;
+
+  try {
+    url = await validatePublicArticleUrl(body.url ?? "");
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Enter a valid article URL.",
+      },
+      { status: 400, headers: corsHeaders },
+    );
+  }
+
+  const provider = allowedSources.has(body.source ?? "")
+    ? body.source ?? "api"
+    : "api";
+  const suppliedIdempotencyKey =
+    request.headers.get("idempotency-key")?.trim() ?? "";
+
+  if (suppliedIdempotencyKey.length > 200) {
+    return NextResponse.json(
+      { error: "Idempotency-Key must be at most 200 characters." },
+      { status: 400, headers: corsHeaders },
+    );
+  }
+
+  const externalId = suppliedIdempotencyKey || randomUUID();
+  const title = cleanTitle(body.title);
+  const sourceHash = personalImportSourceHash(url.href, title);
+
+  try {
+    const record = await claimImport(
+      {
+        ownerEmail: user.email,
+        provider,
+        externalId,
+        sourceHash,
+        sourceTitle: title,
+        sourceUrl: url.href,
+        metadata: {
+          requestedBy: provider,
+        },
+      },
+      {
+        sourceHashMustMatch: true,
+      },
+    );
+
+    if (!record?.attemptId) {
+      const existing = await findImportRecord(user.email, provider, externalId);
+
+      if (!existing) {
+        return NextResponse.json(
+          { error: "The import could not be claimed." },
+          { status: 409, headers: corsHeaders },
+        );
+      }
+
+      if (existing.sourceHash !== sourceHash) {
+        return NextResponse.json(
+          { error: "This idempotency key belongs to a different import request." },
+          { status: 409, headers: corsHeaders },
+        );
+      }
+
       return NextResponse.json(existing, {
         status: existing.status === "completed" ? 200 : 202,
         headers: corsHeaders,
       });
     }
 
-    const record = await markImportPending({
-      ownerEmail: user.email,
+    const attemptId = record.attemptId;
+    const articleId = articleIdForImport(
+      user.email,
       provider,
       externalId,
-      sourceTitle: cleanTitle(body.title),
-      sourceUrl: url.href,
-      metadata: {
-        requestedBy: provider,
-      },
-    });
+      sourceHash,
+    );
 
     if (!hasProductionDatabase()) {
       const result = await runImportJob(
@@ -81,7 +155,9 @@ export async function POST(request: Request) {
         provider,
         externalId,
         url.href,
-        cleanTitle(body.title),
+        title,
+        attemptId,
+        articleId,
       );
       return NextResponse.json(result, { status: 201, headers: corsHeaders });
     }
@@ -92,17 +168,17 @@ export async function POST(request: Request) {
         provider,
         externalId,
         url.href,
-        cleanTitle(body.title),
+        title,
+        attemptId,
+        articleId,
       ),
     );
 
     return NextResponse.json(record, { status: 202, headers: corsHeaders });
-  } catch (error) {
+  } catch {
     return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Could not queue article.",
-      },
-      { status: 400, headers: corsHeaders },
+      { error: "Could not queue article." },
+      { status: 500, headers: corsHeaders },
     );
   }
 }
@@ -125,18 +201,40 @@ async function runImportJob(
   provider: string,
   externalId: string,
   url: string,
-  title?: string,
+  title: string | undefined,
+  attemptId: string,
+  articleId: string,
 ) {
   try {
-    const result = await importUrlArticle(url, ownerEmail, { title });
-    return await markImportCompleted(
+    const existing = await getSavedArticle(articleId, ownerEmail);
+    const result = existing
+      ? { article: existing }
+      : await importUrlArticle(url, ownerEmail, {
+          id: articleId,
+          title,
+        });
+    const completed = await markImportCompletedReconciled(
       ownerEmail,
       provider,
       externalId,
       result.article.id,
+      attemptId,
     );
+
+    if (!completed) {
+      throw new Error("The import lease expired before completion.");
+    }
+
+    return completed;
   } catch (error) {
-    await markImportFailed(ownerEmail, provider, externalId, error);
+    await markImportFailed(
+      ownerEmail,
+      provider,
+      externalId,
+      error,
+      attemptId,
+    ).catch(() => null);
+
     throw error;
   }
 }
@@ -146,12 +244,10 @@ function cleanTitle(title?: string) {
   return normalized ? normalized.slice(0, 240) : undefined;
 }
 
-function extensionCorsHeaders(request: Request): Record<string, string> {
-  const origin = request.headers.get("origin") ?? "";
-  return origin.startsWith("chrome-extension://")
-    ? {
-        "access-control-allow-origin": origin,
-        vary: "origin",
-      }
-    : {};
+function personalImportSourceHash(url: string, title?: string) {
+  return createHash("sha256")
+    .update(url)
+    .update("\0")
+    .update(title ?? "")
+    .digest("hex");
 }

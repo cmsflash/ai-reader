@@ -85,6 +85,104 @@ export async function fetchPublicResource(
   throw new Error("The article URL redirected too many times.");
 }
 
+export async function fetchPublicImageResource(
+  rawUrl: string,
+  init: Omit<RequestInit, "redirect">,
+  maxBytes: number,
+) {
+  const { response, url } = await fetchPublicResource(rawUrl, init);
+
+  if (!response.ok) {
+    await cancelResponseBody(response);
+    return null;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+
+  if (!contentType.toLowerCase().startsWith("image/")) {
+    await cancelResponseBody(response);
+    return null;
+  }
+
+  const body = await readResponseBodyWithLimit(response, maxBytes);
+
+  if (body.byteLength === 0) {
+    return null;
+  }
+
+  return {
+    body,
+    contentType,
+    url,
+  };
+}
+
+export async function readResponseBodyWithLimit(response: Response, maxBytes: number) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new Error("Response body limit must be a positive safe integer.");
+  }
+
+  const declaredLength = response.headers.get("content-length");
+  const parsedLength = declaredLength?.trim() ? Number(declaredLength) : Number.NaN;
+
+  if (Number.isFinite(parsedLength) && parsedLength > maxBytes) {
+    await cancelResponseBody(response);
+    throw responseBodyTooLargeError(maxBytes);
+  }
+
+  if (!response.body) {
+    return Buffer.alloc(0);
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let byteLength = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      if (!value || value.byteLength === 0) {
+        continue;
+      }
+
+      byteLength += value.byteLength;
+
+      if (byteLength > maxBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The size-limit error below is the actionable failure.
+        }
+
+        throw responseBodyTooLargeError(maxBytes);
+      }
+
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return Buffer.concat(chunks, byteLength);
+}
+
+async function cancelResponseBody(response: Response) {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // A response that is already closed or locked needs no further cleanup.
+  }
+}
+
+function responseBodyTooLargeError(maxBytes: number) {
+  return new Error(`Remote resource exceeds the ${maxBytes}-byte archive limit.`);
+}
+
 function isPrivateAddress(address: string) {
   const normalized = address.toLowerCase();
   const version = isIP(normalized);

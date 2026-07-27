@@ -1,21 +1,30 @@
 import {
+  deleteSavedArticle,
+  getSavedArticle,
   importFileArticle,
   importHtmlArticle,
+  importUrlArticle,
 } from "@/server/articles/articleService";
 import {
   createDropboxReadClient,
   type DropboxFileMetadata,
 } from "@/server/integrations/dropboxClient";
 import {
-  findImportRecord,
-  markImportCompleted,
+  articleIdForImport,
+  claimImport,
+  clearImportCleanupArticle,
+  isImportRecordClaimable,
+  listImportRecords,
+  markImportCompletedReconciled,
   markImportFailed,
-  markImportPending,
+  type ExternalImportRecord,
 } from "@/server/integrations/importRecords";
 import {
   createInstapaperClient,
+  InstapaperApiError,
   type InstapaperBookmark,
   type InstapaperBookmarkListInput,
+  type InstapaperClient,
 } from "@/server/integrations/instapaperClient";
 
 const INSTAPAPER_PROVIDER = "instapaper";
@@ -28,6 +37,7 @@ export type ProviderSyncResult = {
   failed: number;
   skipped: number;
   remaining: number;
+  possiblyTruncated?: boolean;
   importedArticles: Array<{
     id: string;
     title: string;
@@ -51,27 +61,33 @@ export async function syncInstapaperArticles(input: {
     folderId: input.folder,
     limit: 500,
   });
-  const decisions = await Promise.all(
-    listing.bookmarks.map(async (bookmark) => ({
+  const records = await listImportRecords(input.ownerEmail, INSTAPAPER_PROVIDER);
+  await retryPendingCleanup(input.ownerEmail, records);
+  const recordByExternalId = importRecordMap(records);
+  const candidates = listing.bookmarks
+    .map((bookmark, index) => ({
       bookmark,
-      shouldImport: await shouldImportInstapaperBookmark(
-        input.ownerEmail,
-        bookmark,
-      ),
-    })),
-  );
-  const candidates = decisions
-    .filter((decision) => decision.shouldImport)
-    .map((decision) => decision.bookmark);
-  const selected = candidates.slice(0, batchSize);
+      index,
+      sourceHash: instapaperSourceHash(bookmark),
+      record: recordByExternalId.get(String(bookmark.bookmark_id)),
+    }))
+    .filter((candidate) =>
+      isImportRecordClaimable(candidate.record, candidate.sourceHash),
+    )
+    .sort(compareImportCandidates);
   const importedArticles: ProviderSyncResult["importedArticles"] = [];
   const failures: ProviderSyncResult["failures"] = [];
+  let claimed = 0;
+  let claimConflicts = 0;
 
-  for (const bookmark of selected) {
+  for (const candidate of candidates) {
+    if (claimed >= batchSize) {
+      break;
+    }
+
+    const { bookmark, sourceHash } = candidate;
     const externalId = String(bookmark.bookmark_id);
-    const sourceHash = instapaperSourceHash(bookmark);
-
-    await markImportPending({
+    const claim = await claimImport({
       ownerEmail: input.ownerEmail,
       provider: INSTAPAPER_PROVIDER,
       externalId,
@@ -87,19 +103,42 @@ export async function syncInstapaperArticles(input: {
       },
     });
 
-    try {
-      const html = await client.getText(bookmark.bookmark_id);
-      const imported = await importHtmlArticle(html, input.ownerEmail, {
-        title: bookmark.title || undefined,
-        sourceUrl: bookmark.url,
-        progress: bookmark.progress,
-      });
+    if (!claim?.attemptId) {
+      claimConflicts += 1;
+      continue;
+    }
 
-      await markImportCompleted(
+    claimed += 1;
+    const articleId = articleIdForImport(
+      input.ownerEmail,
+      INSTAPAPER_PROVIDER,
+      externalId,
+      sourceHash,
+    );
+
+    try {
+      const imported = await importInstapaperBookmark(
+        client,
+        bookmark,
+        input.ownerEmail,
+        articleId,
+      );
+
+      const completed = await markImportCompletedReconciled(
         input.ownerEmail,
         INSTAPAPER_PROVIDER,
         externalId,
         imported.article.id,
+        claim.attemptId,
+      );
+
+      if (!completed) {
+        throw new Error("The Instapaper import lease expired before completion.");
+      }
+
+      await cleanupReplacedArticle(
+        input.ownerEmail,
+        completed,
       );
       importedArticles.push({
         id: imported.article.id,
@@ -111,7 +150,8 @@ export async function syncInstapaperArticles(input: {
         INSTAPAPER_PROVIDER,
         externalId,
         error,
-      );
+        claim.attemptId,
+      ).catch(() => null);
       failures.push({
         externalId,
         title: bookmark.title || bookmark.url,
@@ -123,9 +163,10 @@ export async function syncInstapaperArticles(input: {
   return syncResult({
     importedArticles,
     failures,
-    skipped: decisions.length - candidates.length,
-    remaining: Math.max(candidates.length - selected.length, 0),
+    skipped: listing.bookmarks.length - candidates.length + claimConflicts,
+    remaining: Math.max(candidates.length - claimed - claimConflicts, 0),
     providerLabel: "Instapaper",
+    possiblyTruncated: listing.bookmarks.length >= 500,
   });
 }
 
@@ -138,26 +179,36 @@ export async function syncDropboxAtVoiceArticles(input: {
   const allFiles = (await client.listAtVoiceFiles())
     .filter(isSupportedAtVoiceFile)
     .sort(compareDropboxFilesNewestFirst);
-  const decisions = await Promise.all(
-    allFiles.map(async (file) => ({
+  const records = await listImportRecords(input.ownerEmail, DROPBOX_PROVIDER);
+  await retryPendingCleanup(input.ownerEmail, records);
+  const recordByExternalId = importRecordMap(records);
+  const candidates = allFiles
+    .map((file, index) => ({
       file,
-      shouldImport: await shouldImportDropboxFile(input.ownerEmail, file),
-    })),
-  );
-  const candidates = decisions
-    .filter((decision) => decision.shouldImport)
-    .map((decision) => decision.file);
-  const selected = candidates.slice(0, batchSize);
+      index,
+      sourceHash: dropboxSourceHash(file),
+      record: recordByExternalId.get(file.id),
+    }))
+    .filter((candidate) =>
+      isImportRecordClaimable(candidate.record, candidate.sourceHash),
+    )
+    .sort(compareImportCandidates);
   const importedArticles: ProviderSyncResult["importedArticles"] = [];
   const failures: ProviderSyncResult["failures"] = [];
+  let claimed = 0;
+  let claimConflicts = 0;
 
-  for (const metadata of selected) {
+  for (const candidate of candidates) {
+    if (claimed >= batchSize) {
+      break;
+    }
+
+    const { file: metadata, sourceHash } = candidate;
     const externalId = metadata.id;
-    const sourceHash = dropboxSourceHash(metadata);
     const sourcePath =
       metadata.path_display ?? metadata.path_lower ?? metadata.name;
 
-    await markImportPending({
+    const claim = await claimImport({
       ownerEmail: input.ownerEmail,
       provider: DROPBOX_PROVIDER,
       externalId,
@@ -172,21 +223,45 @@ export async function syncDropboxAtVoiceArticles(input: {
       },
     });
 
-    try {
-      const bytes = await client.downloadFile(metadata.id);
-      const contents = new ArrayBuffer(bytes.byteLength);
-      new Uint8Array(contents).set(bytes);
-      const file = new File([contents], metadata.name, {
-        type: contentTypeForFile(metadata.name),
-        lastModified: modifiedTimeForFile(metadata),
-      });
-      const imported = await importFileArticle(file, input.ownerEmail);
+    if (!claim?.attemptId) {
+      claimConflicts += 1;
+      continue;
+    }
 
-      await markImportCompleted(
+    claimed += 1;
+    const articleId = articleIdForImport(
+      input.ownerEmail,
+      DROPBOX_PROVIDER,
+      externalId,
+      sourceHash,
+    );
+
+    try {
+      const existing = await getSavedArticle(articleId, input.ownerEmail);
+      const imported = existing
+        ? { article: existing }
+        : await importDropboxFile(
+            client,
+            metadata,
+            input.ownerEmail,
+            articleId,
+          );
+
+      const completed = await markImportCompletedReconciled(
         input.ownerEmail,
         DROPBOX_PROVIDER,
         externalId,
         imported.article.id,
+        claim.attemptId,
+      );
+
+      if (!completed) {
+        throw new Error("The Dropbox import lease expired before completion.");
+      }
+
+      await cleanupReplacedArticle(
+        input.ownerEmail,
+        completed,
       );
       importedArticles.push({
         id: imported.article.id,
@@ -198,7 +273,8 @@ export async function syncDropboxAtVoiceArticles(input: {
         DROPBOX_PROVIDER,
         externalId,
         error,
-      );
+        claim.attemptId,
+      ).catch(() => null);
       failures.push({
         externalId,
         title: metadata.name,
@@ -210,63 +286,16 @@ export async function syncDropboxAtVoiceArticles(input: {
   return syncResult({
     importedArticles,
     failures,
-    skipped: decisions.length - candidates.length,
-    remaining: Math.max(candidates.length - selected.length, 0),
+    skipped: allFiles.length - candidates.length + claimConflicts,
+    remaining: Math.max(candidates.length - claimed - claimConflicts, 0),
     providerLabel: "@Voice Dropbox",
   });
-}
-
-async function shouldImportInstapaperBookmark(
-  ownerEmail: string,
-  bookmark: InstapaperBookmark,
-) {
-  const record = await findImportRecord(
-    ownerEmail,
-    INSTAPAPER_PROVIDER,
-    String(bookmark.bookmark_id),
-  );
-
-  if (!record) {
-    return true;
-  }
-
-  if (record.status === "pending") {
-    return isStalePending(record.updatedAt);
-  }
-
-  return record.status === "failed";
-}
-
-async function shouldImportDropboxFile(
-  ownerEmail: string,
-  metadata: DropboxFileMetadata,
-) {
-  const record = await findImportRecord(
-    ownerEmail,
-    DROPBOX_PROVIDER,
-    metadata.id,
-  );
-
-  if (!record) {
-    return true;
-  }
-
-  if (record.status === "pending") {
-    return isStalePending(record.updatedAt);
-  }
-
-  return record.status === "failed";
 }
 
 function instapaperSourceHash(bookmark: InstapaperBookmark) {
   return (
     bookmark.hash ||
-    [
-      bookmark.time,
-      bookmark.progress_timestamp,
-      bookmark.progress,
-      bookmark.url,
-    ].join(":")
+    [bookmark.time, bookmark.url].join(":")
   );
 }
 
@@ -274,12 +303,166 @@ function dropboxSourceHash(metadata: DropboxFileMetadata) {
   return (
     metadata.content_hash ||
     metadata.rev ||
-    [
-      metadata.server_modified,
-      metadata.client_modified,
-      metadata.size,
-    ].join(":")
+    [metadata.server_modified, metadata.size].join(":")
   );
+}
+
+function importRecordMap(records: ExternalImportRecord[]) {
+  return new Map(records.map((record) => [record.externalId, record]));
+}
+
+function compareImportCandidates(
+  left: { index: number; record?: ExternalImportRecord },
+  right: { index: number; record?: ExternalImportRecord },
+) {
+  const priorityDifference =
+    importCandidatePriority(left.record) - importCandidatePriority(right.record);
+  return priorityDifference || left.index - right.index;
+}
+
+function importCandidatePriority(record?: ExternalImportRecord) {
+  if (!record || record.status === "completed") {
+    return 0;
+  }
+
+  return record.status === "pending" ? 1 : 2;
+}
+
+async function importInstapaperBookmark(
+  client: InstapaperClient,
+  bookmark: InstapaperBookmark,
+  ownerEmail: string,
+  articleId: string,
+) {
+  const existing = await getSavedArticle(articleId, ownerEmail);
+
+  if (existing) {
+    return { article: existing };
+  }
+
+  try {
+    const html = await client.getText(bookmark.bookmark_id);
+    return await importHtmlArticle(html, ownerEmail, {
+      id: articleId,
+      title: bookmark.title || undefined,
+      sourceUrl: bookmark.url,
+      progress: bookmark.progress,
+    });
+  } catch (error) {
+    if (!shouldFallbackToBookmarkUrl(error, bookmark.url)) {
+      throw error;
+    }
+
+    return importUrlArticle(bookmark.url, ownerEmail, {
+      id: articleId,
+      title: bookmark.title || undefined,
+      progress: bookmark.progress,
+    });
+  }
+}
+
+async function importDropboxFile(
+  client: ReturnType<typeof createDropboxReadClient>,
+  metadata: DropboxFileMetadata,
+  ownerEmail: string,
+  articleId: string,
+) {
+  const bytes = await client.downloadFile(metadata.id);
+  const contents = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(contents).set(bytes);
+  const file = new File([contents], metadata.name, {
+    type: contentTypeForFile(metadata.name),
+    lastModified: modifiedTimeForFile(metadata),
+  });
+
+  return importFileArticle(file, ownerEmail, { id: articleId });
+}
+
+function shouldFallbackToBookmarkUrl(error: unknown, rawUrl: string) {
+  let url: URL;
+
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+
+  if (!["http:", "https:"].includes(url.protocol)) {
+    return false;
+  }
+
+  return (
+    error instanceof InstapaperApiError &&
+    !error.retryable &&
+    error.kind !== "configuration"
+  );
+}
+
+async function retryPendingCleanup(
+  ownerEmail: string,
+  records: ExternalImportRecord[],
+) {
+  for (const record of records) {
+    if (!record.cleanupArticleId) {
+      continue;
+    }
+
+    const cleaned = await deleteArticleBestEffort(
+      record.cleanupArticleId,
+      ownerEmail,
+    );
+
+    if (!cleaned) {
+      continue;
+    }
+
+    try {
+      await clearImportCleanupArticle(
+        ownerEmail,
+        record.provider,
+        record.externalId,
+        record.cleanupArticleId,
+      );
+      record.cleanupArticleId = undefined;
+    } catch {
+      // Keep the in-memory cleanup marker so this sync does not replace it.
+    }
+  }
+}
+
+async function cleanupReplacedArticle(
+  ownerEmail: string,
+  record: ExternalImportRecord,
+) {
+  if (!record.cleanupArticleId) {
+    return;
+  }
+
+  const cleaned = await deleteArticleBestEffort(
+    record.cleanupArticleId,
+    ownerEmail,
+  );
+
+  if (!cleaned) {
+    return;
+  }
+
+  await clearImportCleanupArticle(
+    ownerEmail,
+    record.provider,
+    record.externalId,
+    record.cleanupArticleId,
+  ).catch(() => null);
+}
+
+async function deleteArticleBestEffort(articleId: string, ownerEmail: string) {
+  try {
+    await deleteSavedArticle(articleId, ownerEmail);
+    return true;
+  } catch {
+    // A completed replacement remains valid even if old-artifact cleanup must be retried later.
+    return false;
+  }
 }
 
 function normalizeBatchSize(value?: number) {
@@ -290,14 +473,6 @@ function normalizeBatchSize(value?: number) {
   return Math.min(
     Math.max(Math.trunc(value ?? DEFAULT_BATCH_SIZE), 1),
     MAX_BATCH_SIZE,
-  );
-}
-
-function isStalePending(updatedAt: string) {
-  const updatedTime = Date.parse(updatedAt);
-  return (
-    !Number.isFinite(updatedTime) ||
-    Date.now() - updatedTime > 15 * 60 * 1_000
   );
 }
 
@@ -372,13 +547,17 @@ function syncResult(input: {
   skipped: number;
   remaining: number;
   providerLabel: string;
+  possiblyTruncated?: boolean;
 }): ProviderSyncResult {
   const imported = input.importedArticles.length;
   const failed = input.failures.length;
-  const message =
+  const summary =
     imported === 0 && failed === 0
       ? `${input.providerLabel} is already up to date.`
       : `${input.providerLabel}: imported ${imported}, failed ${failed}, ${input.remaining} remaining.`;
+  const message = input.possiblyTruncated
+    ? `${summary} Instapaper returned its 500-item limit, so older bookmarks may not be visible yet.`
+    : summary;
 
   return {
     imported,
@@ -387,6 +566,7 @@ function syncResult(input: {
     remaining: input.remaining,
     importedArticles: input.importedArticles,
     failures: input.failures,
+    possiblyTruncated: input.possiblyTruncated,
     message,
   };
 }

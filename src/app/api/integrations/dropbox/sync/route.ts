@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
-import { requireAppUser } from "@/server/auth/access";
-import { getDropboxConfiguredStatus } from "@/server/integrations/dropboxClient";
+import {
+  requireAppUser,
+  requireIntegrationOwnerResponse,
+} from "@/server/auth/access";
+import {
+  DropboxClientError,
+  getDropboxConfiguredStatus,
+} from "@/server/integrations/dropboxClient";
 import { syncDropboxAtVoiceArticles } from "@/server/integrations/providerSync";
 
 export const runtime = "nodejs";
@@ -13,6 +19,12 @@ export async function POST(request: Request) {
     return auth.response;
   }
 
+  const ownerError = requireIntegrationOwnerResponse(auth.user.email);
+
+  if (ownerError) {
+    return ownerError;
+  }
+
   const configuration = getDropboxConfiguredStatus();
 
   if (!configuration.configured) {
@@ -22,10 +34,22 @@ export async function POST(request: Request) {
     );
   }
 
+  let body: {
+    batchSize?: number;
+  };
+
   try {
-    const body = (await request.json().catch(() => ({}))) as {
+    body = (await request.json()) as {
       batchSize?: number;
     };
+  } catch {
+    return NextResponse.json(
+      { error: "Request body must be valid JSON." },
+      { status: 400 },
+    );
+  }
+
+  try {
     const result = await syncDropboxAtVoiceArticles({
       ownerEmail: auth.user.email,
       batchSize: body.batchSize,
@@ -33,14 +57,16 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result);
   } catch (error) {
+    if (error instanceof DropboxClientError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status === 429 ? 429 : 502 },
+      );
+    }
+
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Could not sync @Voice from Dropbox.",
-      },
-      { status: 400 },
+      { error: "Could not sync @Voice from Dropbox." },
+      { status: 500 },
     );
   }
 }

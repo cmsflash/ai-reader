@@ -29,6 +29,7 @@ NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
 NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL=/
 NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL=/
 AI_READER_ALLOWED_EMAILS=you@example.com
+AI_READER_INTEGRATION_OWNER_EMAIL=you@example.com
 AI_READER_IMPORT_TOKEN=...
 AI_READER_IMPORT_OWNER_EMAIL=you@example.com
 INSTAPAPER_CONSUMER_KEY=...
@@ -47,6 +48,11 @@ ELEVENLABS_COST_PER_1K_CHARS_USD=0
 If Clerk keys are empty in production, the app shows a setup-required page and blocks the API.
 Enable Google sign-in and any passkey options in Clerk. Keep `AI_READER_ALLOWED_EMAILS` set
 for a personal deployment so arbitrary Google accounts cannot spend import or TTS budget.
+The hosted app fails closed when that allowlist is empty.
+
+Set `AI_READER_INTEGRATION_OWNER_EMAIL` to the one allowed account that owns the Instapaper and
+Dropbox credentials below. Provider status and sync routes reject every other signed-in account,
+even if it is also present in the broader app allowlist.
 
 `AI_READER_IMPORT_TOKEN` is a separate bearer token for personal import clients such as the Chrome
 extension or an optional direct iOS Shortcut. Generate a high-entropy value, for example with
@@ -105,11 +111,12 @@ AI Reader's Dropbox app sandbox, so create a [scoped Dropbox
 app](https://www.dropbox.com/developers/apps/create) with **Full Dropbox** access. In the app's
 Permissions tab, enable only:
 
+- `account_info.read` for the basic account identity shown during authorization
 - `files.metadata.read` for recursive folder listing
 - `files.content.read` for downloading selected files
 
-Do not enable write, sharing, account, or team scopes. Full Dropbox chooses which existing paths
-the app can address; the two read scopes constrain what it can do there. Dropbox explains the
+Do not enable write, sharing, or team scopes. Full Dropbox chooses which existing paths
+the app can address; these read scopes constrain what it can do there. Dropbox explains the
 [App folder versus Full Dropbox access
 model](https://www.dropbox.com/developers/reference/developer-guide) and scoped permissions in its
 [Getting Started guide](https://www.dropbox.com/developers/reference/getting-started).
@@ -162,6 +169,8 @@ Idempotency-Key: UNIQUE_REQUEST_ID
 Accepted source values are `api`, `android-share`, `chrome-extension`, and `ios-shortcut`.
 `AI_READER_IMPORT_OWNER_EMAIL` determines article ownership. Keep the token out of URLs, logs,
 screenshots, source control, and shared Shortcuts.
+Keep each `Idempotency-Key` at 200 characters or fewer and never reuse it for a different URL or
+title; AI Reader binds the first request fingerprint to that key.
 
 ### Package and install the Chrome extension
 

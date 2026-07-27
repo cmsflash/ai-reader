@@ -201,6 +201,136 @@ test("refreshes once and retries an API request after an unexpected 401", async 
   assert.equal(listRequests, 2);
 });
 
+test("rejects an oversized declared download before acquiring a stream reader", async () => {
+  let cancelCalls = 0;
+  let getReaderCalls = 0;
+  const fakeFetch = async (url) => {
+    if (url.endsWith("/oauth2/token")) {
+      return jsonResponse({
+        access_token: "token",
+        expires_in: 3600,
+      });
+    }
+
+    return {
+      status: 200,
+      ok: true,
+      headers: new Headers({
+        "content-length": "6",
+      }),
+      body: {
+        async cancel() {
+          cancelCalls += 1;
+        },
+        getReader() {
+          getReaderCalls += 1;
+          throw new Error("The stream reader must not be acquired.");
+        },
+      },
+    };
+  };
+  const client = createDropboxReadClient({
+    env: configuredEnv,
+    fetch: fakeFetch,
+    maxDownloadBytes: 5,
+  });
+
+  await assert.rejects(
+    () => client.downloadFile("id:oversized"),
+    /configured 5-byte download limit/i,
+  );
+  assert.equal(getReaderCalls, 0);
+  assert.equal(cancelCalls, 1);
+});
+
+test("cancels a streamed download as soon as it crosses the byte limit", async () => {
+  let cancelCalls = 0;
+  let readCalls = 0;
+  let releaseCalls = 0;
+  const chunks = [
+    Uint8Array.from([1, 2, 3]),
+    Uint8Array.from([4, 5, 6]),
+  ];
+  const fakeFetch = async (url) => {
+    if (url.endsWith("/oauth2/token")) {
+      return jsonResponse({
+        access_token: "token",
+        expires_in: 3600,
+      });
+    }
+
+    return {
+      status: 200,
+      ok: true,
+      headers: new Headers(),
+      body: {
+        getReader() {
+          return {
+            async read() {
+              const value = chunks[readCalls];
+              readCalls += 1;
+              return value ? { done: false, value } : { done: true };
+            },
+            async cancel() {
+              cancelCalls += 1;
+            },
+            releaseLock() {
+              releaseCalls += 1;
+            },
+          };
+        },
+      },
+    };
+  };
+  const client = createDropboxReadClient({
+    env: configuredEnv,
+    fetch: fakeFetch,
+    maxDownloadBytes: 5,
+  });
+
+  await assert.rejects(
+    () => client.downloadFile("id:streamed-oversized"),
+    /configured 5-byte download limit/i,
+  );
+  assert.equal(readCalls, 2);
+  assert.equal(cancelCalls, 1);
+  assert.equal(releaseCalls, 1);
+});
+
+test("aborts a Dropbox request that exceeds its configured timeout", async () => {
+  let requestWasAborted = false;
+  const fakeFetch = async (url, init = {}) => {
+    if (url.endsWith("/oauth2/token")) {
+      return jsonResponse({
+        access_token: "token",
+        expires_in: 3600,
+      });
+    }
+
+    return new Promise((resolve, reject) => {
+      init.signal.addEventListener(
+        "abort",
+        () => {
+          requestWasAborted = true;
+          reject(init.signal.reason);
+        },
+        { once: true },
+      );
+    });
+  };
+  const client = createDropboxReadClient({
+    env: configuredEnv,
+    fetch: fakeFetch,
+    requestTimeoutMs: 5,
+  });
+
+  await assert.rejects(
+    () => client.downloadFile("id:slow"),
+    /Dropbox API request timed out.*5 ms/i,
+  );
+  assert.equal(requestWasAborted, true);
+});
+
 test("fails safely when configuration or download references are invalid", async () => {
   let fetchCalled = false;
   const client = createDropboxReadClient({

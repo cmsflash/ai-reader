@@ -81,6 +81,12 @@ type IntegrationSyncResponse = {
   failed: number;
   skipped: number;
   remaining: number;
+  possiblyTruncated?: boolean;
+  failures?: Array<{
+    externalId: string;
+    title: string;
+    error: string;
+  }>;
   message?: string;
 };
 
@@ -1279,14 +1285,20 @@ function integrationSyncMessage(
   provider: IntegrationProvider,
   result: IntegrationSyncResponse,
 ) {
+  const failureDetails = (result.failures ?? [])
+    .slice(0, 2)
+    .map((failure) => `${failure.title}: ${failure.error}`)
+    .join(" · ");
+  const detailSuffix = failureDetails ? ` ${failureDetails}` : "";
+
   if (result.message) {
-    return result.message;
+    return `${result.message}${detailSuffix}`;
   }
 
   const name = provider === "instapaper" ? "Instapaper" : "@Voice";
   const remaining = result.remaining > 0 ? ` · ${result.remaining} remaining` : "";
 
-  return `${name}: ${result.imported} imported · ${result.skipped} skipped · ${result.failed} failed${remaining}`;
+  return `${name}: ${result.imported} imported · ${result.skipped} skipped · ${result.failed} failed${remaining}${detailSuffix}`;
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {

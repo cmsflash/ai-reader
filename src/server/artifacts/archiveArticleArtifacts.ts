@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { blocksToHtml } from "@/lib/extractors";
 import { imageFetchHeaders } from "@/server/artifacts/imageRequests";
 import { getArtifactStorage } from "@/server/runtime/artifactStorage";
+import { fetchPublicImageResource } from "@/server/security/publicArticleUrl";
 import type { Article, ArticleBlock } from "@/lib/types";
 
 const maxArtifactBytes = 30 * 1024 * 1024;
@@ -54,32 +55,23 @@ async function archiveImageBlock(
 
   try {
     const sourceUrl = article.sourceUrl ? new URL(article.sourceUrl) : null;
-    const response = await fetch(source.href, {
-      headers: imageFetchHeaders(source, sourceUrl),
-      redirect: "follow",
-    });
+    const resource = await fetchPublicImageResource(
+      source.href,
+      {
+        headers: imageFetchHeaders(source, sourceUrl),
+      },
+      maxArtifactBytes,
+    );
 
-    if (!response.ok) {
+    if (!resource) {
       return block;
     }
 
-    const contentType = response.headers.get("content-type") ?? "application/octet-stream";
-
-    if (!contentType.toLowerCase().startsWith("image/")) {
-      return block;
-    }
-
-    const body = Buffer.from(await response.arrayBuffer());
-
-    if (body.byteLength === 0 || body.byteLength > maxArtifactBytes) {
-      return block;
-    }
-
-    const key = artifactKeyForImage(article, source, contentType, index);
+    const key = artifactKeyForImage(article, source, resource.contentType, index);
     const stored = await getArtifactStorage().put({
       key,
-      body,
-      contentType,
+      body: resource.body,
+      contentType: resource.contentType,
       visibility: "public",
     });
 

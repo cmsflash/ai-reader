@@ -17,8 +17,51 @@ export function isEmailAllowed(email: string | null | undefined) {
   const allowedEmails = getAllowedEmails();
 
   if (allowedEmails.length === 0) {
-    return true;
+    return false;
   }
 
-  return Boolean(email && allowedEmails.includes(email.toLowerCase()));
+  return Boolean(email && allowedEmails.includes(normalizeEmail(email)));
+}
+
+export function getIntegrationOwnerEmail() {
+  const configured =
+    process.env.AI_READER_INTEGRATION_OWNER_EMAIL?.trim() ||
+    process.env.AI_READER_IMPORT_OWNER_EMAIL?.trim();
+  return configured ? normalizeEmail(configured) : null;
+}
+
+export function isIntegrationOwner(email: string | null | undefined) {
+  const ownerEmail = getIntegrationOwnerEmail();
+  return Boolean(ownerEmail && email && ownerEmail === normalizeEmail(email));
+}
+
+export function selectVerifiedAllowedEmail(
+  emailAddresses: ReadonlyArray<{
+    id: string;
+    emailAddress: string;
+    verification?: {
+      status?: string | null;
+    } | null;
+  }>,
+  primaryEmailAddressId?: string | null,
+) {
+  const verified = emailAddresses.filter(
+    (email) => email.verification?.status === "verified",
+  );
+  const primary = verified.find(
+    (email) => email.id === primaryEmailAddressId,
+  );
+  const ordered = [
+    primary,
+    ...verified.filter((email) => email.id !== primary?.id),
+  ].filter((email): email is NonNullable<typeof email> => Boolean(email));
+
+  return (
+    ordered.find((email) => isEmailAllowed(email.emailAddress))?.emailAddress ??
+    ordered[0]?.emailAddress
+  );
+}
+
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
 }

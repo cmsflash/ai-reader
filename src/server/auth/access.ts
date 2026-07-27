@@ -2,8 +2,11 @@ import { currentUser } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import {
   getAllowedEmails,
+  getIntegrationOwnerEmail,
   isClerkConfigured,
   isEmailAllowed,
+  isIntegrationOwner,
+  selectVerifiedAllowedEmail,
   shouldBypassAuthLocally,
 } from "@/server/auth/config";
 
@@ -59,7 +62,10 @@ export async function getAppAuthStatus(): Promise<AppAuthStatus> {
     };
   }
 
-  const email = primaryEmailForUser(user);
+  const email = selectVerifiedAllowedEmail(
+    user.emailAddresses,
+    user.primaryEmailAddressId,
+  );
 
   return {
     enabled: true,
@@ -94,6 +100,24 @@ export async function requireAppUserResponse() {
   return responseForUnauthorizedStatus(status);
 }
 
+export function requireIntegrationOwnerResponse(email: string) {
+  if (!getIntegrationOwnerEmail()) {
+    return NextResponse.json(
+      { error: "Provider integrations do not have a configured owner." },
+      { status: 503 },
+    );
+  }
+
+  if (!isIntegrationOwner(email)) {
+    return NextResponse.json(
+      { error: "Provider integrations are available only to their configured owner." },
+      { status: 403 },
+    );
+  }
+
+  return null;
+}
+
 function responseForUnauthorizedStatus(status: AppAuthStatus) {
   if (!status.enabled) {
     return null;
@@ -118,16 +142,6 @@ function responseForUnauthorizedStatus(status: AppAuthStatus) {
   }
 
   return null;
-}
-
-type ClerkUser = Awaited<ReturnType<typeof currentUser>>;
-
-function primaryEmailForUser(user: NonNullable<ClerkUser>) {
-  return (
-    user.primaryEmailAddress?.emailAddress ??
-    user.emailAddresses.find((email) => email.id === user.primaryEmailAddressId)?.emailAddress ??
-    user.emailAddresses[0]?.emailAddress
-  );
 }
 
 function localDevelopmentOwnerEmail() {

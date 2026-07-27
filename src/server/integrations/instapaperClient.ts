@@ -10,6 +10,8 @@ const credentialEnvironmentNames = {
 } as const;
 
 const retryableApiCodes = new Set([1040, 1047, 1500]);
+const defaultRequestTimeoutMs = 10_000;
+const defaultMaxResponseBytes = 16 * 1024 * 1024;
 
 export type InstapaperConfigurationStatus = {
   configured: boolean;
@@ -153,6 +155,8 @@ export type InstapaperClientOptions = {
   sleep?: (milliseconds: number) => Promise<void>;
   random?: () => number;
   retry?: RetryOptions;
+  requestTimeoutMs?: number;
+  maxResponseBytes?: number;
 };
 
 type RequiredRetryOptions = {
@@ -201,6 +205,14 @@ export function createInstapaperClient(options: InstapaperClientOptions = {}): I
     sleep: options.sleep ?? sleep,
     random: options.random ?? Math.random,
     retry: normalizeRetryOptions(options.retry),
+    requestTimeoutMs: normalizePositiveInteger(
+      options.requestTimeoutMs,
+      defaultRequestTimeoutMs,
+    ),
+    maxResponseBytes: normalizePositiveInteger(
+      options.maxResponseBytes,
+      defaultMaxResponseBytes,
+    ),
   };
 
   return {
@@ -268,6 +280,8 @@ type ClientDependencies = {
   sleep: (milliseconds: number) => Promise<void>;
   random: () => number;
   retry: RequiredRetryOptions;
+  requestTimeoutMs: number;
+  maxResponseBytes: number;
 };
 
 async function requestWithRetry(
@@ -336,17 +350,47 @@ async function requestOnce(
     dependencies.nonce,
   );
   const body = new URLSearchParams(parameters).toString();
-  const response = await dependencies.fetcher(endpoint, {
-    method: "POST",
-    headers: {
-      accept: responseKind === "text" ? "text/html,application/json" : "application/json",
-      authorization,
-      "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-    },
-    body,
-    cache: "no-store",
-  });
-  const responseBody = await response.text();
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, dependencies.requestTimeoutMs);
+  let response: Response;
+  let responseBody: string;
+
+  try {
+    response = await dependencies.fetcher(endpoint, {
+      method: "POST",
+      headers: {
+        accept: responseKind === "text" ? "text/html,application/json" : "application/json",
+        authorization,
+        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+      },
+      body,
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    responseBody = await readBoundedResponseBody(
+      response,
+      dependencies.maxResponseBytes,
+      endpoint,
+      controller.signal,
+    );
+
+    if (timedOut) {
+      throw requestTimeoutError(endpoint);
+    }
+  } catch (caught) {
+    if (timedOut) {
+      throw requestTimeoutError(endpoint);
+    }
+
+    throw caught;
+  } finally {
+    clearTimeout(timeout);
+  }
+
   const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"), dependencies.now);
 
   if (!response.ok) {
@@ -367,7 +411,13 @@ async function requestOnce(
   }
 
   if (responseKind === "text") {
-    return responseBody;
+    return validatedGetTextResponse(
+      responseBody,
+      response.headers.get("content-type"),
+      endpoint,
+      response.status,
+      retryAfterMs,
+    );
   }
 
   const payload = parseJson(responseBody);
@@ -389,6 +439,185 @@ async function requestOnce(
   }
 
   return payload;
+}
+
+async function readBoundedResponseBody(
+  response: Response,
+  maxResponseBytes: number,
+  endpoint: string,
+  signal: AbortSignal,
+) {
+  const declaredLength = response.headers.get("content-length");
+  const parsedLength = declaredLength ? Number(declaredLength) : Number.NaN;
+
+  if (Number.isFinite(parsedLength) && parsedLength > maxResponseBytes) {
+    throw responseTooLargeError(endpoint, response.status);
+  }
+
+  if (!response.body) {
+    return "";
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  let completed = false;
+
+  try {
+    while (true) {
+      const { done, value } = await readResponseChunk(reader, signal);
+
+      if (done) {
+        completed = true;
+        break;
+      }
+
+      if (!value || value.byteLength === 0) {
+        continue;
+      }
+
+      totalBytes += value.byteLength;
+
+      if (totalBytes > maxResponseBytes) {
+        throw responseTooLargeError(endpoint, response.status);
+      }
+
+      chunks.push(value);
+    }
+  } catch (error) {
+    void reader.cancel().catch(() => undefined);
+    throw error;
+  } finally {
+    if (completed) {
+      reader.releaseLock();
+    }
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return new TextDecoder().decode(bytes);
+}
+
+function readResponseChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new Error("The request was aborted."));
+  }
+
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      reject(signal.reason ?? new Error("The request was aborted."));
+    };
+    const cleanup = () => {
+      signal.removeEventListener("abort", abort);
+    };
+
+    signal.addEventListener("abort", abort, { once: true });
+    reader.read().then(
+      (result) => {
+        cleanup();
+        resolve(result);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+function validatedGetTextResponse(
+  responseBody: string,
+  contentType: string | null,
+  endpoint: string,
+  status: number,
+  retryAfterMs?: number,
+) {
+  const trimmedBody = responseBody.trim();
+
+  if (!trimmedBody) {
+    throw invalidGetTextResponseError(
+      endpoint,
+      status,
+      "Instapaper returned an empty get_text response.",
+    );
+  }
+
+  const payload = parseJson(trimmedBody);
+
+  if (payload !== undefined) {
+    const apiError = apiErrorFromPayload(payload);
+
+    if (apiError) {
+      throw apiResponseError(endpoint, status, apiError, retryAfterMs);
+    }
+
+    throw invalidGetTextResponseError(
+      endpoint,
+      status,
+      "Instapaper returned JSON where get_text HTML was required.",
+    );
+  }
+
+  const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+
+  if (mediaType && mediaType !== "text/html" && mediaType !== "application/xhtml+xml") {
+    throw invalidGetTextResponseError(
+      endpoint,
+      status,
+      "Instapaper returned a non-HTML get_text content type.",
+    );
+  }
+
+  if (!/<(?:!doctype\s+html|[a-z][a-z0-9-]*)(?:\s[^<>]*)?>/i.test(trimmedBody)) {
+    throw invalidGetTextResponseError(
+      endpoint,
+      status,
+      "Instapaper returned a non-HTML get_text body.",
+    );
+  }
+
+  return responseBody;
+}
+
+function requestTimeoutError(endpoint: string) {
+  return new InstapaperApiError({
+    message: "The Instapaper request timed out.",
+    kind: "network",
+    endpoint,
+    retryable: true,
+  });
+}
+
+function responseTooLargeError(endpoint: string, status: number) {
+  return new InstapaperApiError({
+    message: "The Instapaper response exceeded the allowed size.",
+    kind: "invalid-response",
+    endpoint,
+    status,
+  });
+}
+
+function invalidGetTextResponseError(
+  endpoint: string,
+  status: number,
+  apiMessage: string,
+) {
+  return new InstapaperApiError({
+    message: "Instapaper returned an unexpected get_text response.",
+    kind: "invalid-response",
+    endpoint,
+    status,
+    apiMessage,
+  });
 }
 
 function oauthAuthorizationHeader(
@@ -799,6 +1028,12 @@ function normalizeRetryOptions(options: RetryOptions | undefined): RequiredRetry
     baseDelayMs,
     maxDelayMs,
   };
+}
+
+function normalizePositiveInteger(value: number | undefined, fallback: number) {
+  return Number.isFinite(value) && value !== undefined && value > 0
+    ? Math.max(1, Math.floor(value))
+    : fallback;
 }
 
 function sleep(milliseconds: number) {

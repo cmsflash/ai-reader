@@ -5,7 +5,7 @@ import {
   type ArticleProgressPatch,
   type ArticleRepository,
   toArticleSummary,
-} from "@/server/ports/articleRepository";
+} from "../ports/articleRepository.ts";
 
 type LocalJsonArticleRepositoryOptions = {
   storePath?: string;
@@ -15,23 +15,28 @@ type StoredArticle = Article & {
   ownerEmail?: string;
 };
 
+type StoreMutation<T> = {
+  store?: ArticleStore;
+  value: T;
+};
+
 export class LocalJsonArticleRepository implements ArticleRepository {
   private readonly storePath: string;
-  private writeQueue = Promise.resolve();
+  private mutationQueue = Promise.resolve();
 
   constructor(options: LocalJsonArticleRepositoryOptions = {}) {
     this.storePath = resolveStorePath(options.storePath);
   }
 
   async list(ownerEmail: string) {
-    const store = await this.readStore();
+    const store = await this.readCurrentStore();
     return store.articles
       .filter((article) => articleBelongsToOwner(article, ownerEmail))
       .map(toArticleSummary);
   }
 
   async findById(id: string, ownerEmail: string) {
-    const store = await this.readStore();
+    const store = await this.readCurrentStore();
     return (
       store.articles.find(
         (article) => article.id === id && articleBelongsToOwner(article, ownerEmail),
@@ -40,107 +45,135 @@ export class LocalJsonArticleRepository implements ArticleRepository {
   }
 
   async create(article: Article, ownerEmail: string) {
-    const store = await this.readStore();
-    const storedArticle: StoredArticle = {
-      ...article,
-      ownerEmail: normalizeOwnerEmail(ownerEmail),
-    };
-    await this.writeStore({
-      ...store,
-      articles: [storedArticle, ...store.articles],
-    });
+    return this.mutateStore((store) => {
+      const existing = store.articles.find(
+        (candidate) =>
+          candidate.id === article.id &&
+          articleBelongsToOwner(candidate, ownerEmail),
+      );
 
-    return article;
+      if (existing) {
+        return { value: existing };
+      }
+
+      const storedArticle: StoredArticle = {
+        ...article,
+        ownerEmail: normalizeOwnerEmail(ownerEmail),
+      };
+
+      return {
+        store: {
+          ...store,
+          articles: [storedArticle, ...store.articles],
+        },
+        value: article,
+      };
+    });
   }
 
   async updateProgress(id: string, ownerEmail: string, progress: ArticleProgressPatch) {
-    const store = await this.readStore();
-    const articleIndex = store.articles.findIndex(
-      (article) => article.id === id && articleBelongsToOwner(article, ownerEmail),
-    );
+    return this.mutateStore((store) => {
+      const articleIndex = store.articles.findIndex(
+        (article) =>
+          article.id === id && articleBelongsToOwner(article, ownerEmail),
+      );
 
-    if (articleIndex === -1) {
-      return null;
-    }
+      if (articleIndex === -1) {
+        return { value: null };
+      }
 
-    const now = new Date().toISOString();
-    const article = store.articles[articleIndex];
-    const nextProgress: ReadingProgress = {
-      sentenceIndex: clampInteger(
-        progress.sentenceIndex ?? article.progress.sentenceIndex,
-        0,
-        Math.max(article.sentenceCount - 1, 0),
-      ),
-      percent: clampNumber(progress.percent ?? article.progress.percent, 0, 1),
-      updatedAt: now,
-    };
+      const now = new Date().toISOString();
+      const article = store.articles[articleIndex];
+      const nextProgress: ReadingProgress = {
+        sentenceIndex: clampInteger(
+          progress.sentenceIndex ?? article.progress.sentenceIndex,
+          0,
+          Math.max(article.sentenceCount - 1, 0),
+        ),
+        percent: clampNumber(progress.percent ?? article.progress.percent, 0, 1),
+        updatedAt: now,
+      };
+      const updatedArticle: Article = {
+        ...article,
+        updatedAt: now,
+        progress: nextProgress,
+      };
+      const nextArticles = [...store.articles];
+      nextArticles[articleIndex] = updatedArticle;
 
-    const updatedArticle: Article = {
-      ...article,
-      updatedAt: now,
-      progress: nextProgress,
-    };
-    const nextArticles = [...store.articles];
-    nextArticles[articleIndex] = updatedArticle;
-
-    await this.writeStore({
-      ...store,
-      articles: nextArticles,
+      return {
+        store: {
+          ...store,
+          articles: nextArticles,
+        },
+        value: updatedArticle,
+      };
     });
-
-    return updatedArticle;
   }
 
   async addProcessingCost(id: string, ownerEmail: string, costUsd: number) {
-    const store = await this.readStore();
-    const articleIndex = store.articles.findIndex(
-      (article) => article.id === id && articleBelongsToOwner(article, ownerEmail),
-    );
+    return this.mutateStore((store) => {
+      const articleIndex = store.articles.findIndex(
+        (article) =>
+          article.id === id && articleBelongsToOwner(article, ownerEmail),
+      );
 
-    if (articleIndex === -1) {
-      return null;
-    }
+      if (articleIndex === -1) {
+        return { value: null };
+      }
 
-    const safeCost = clampNumber(costUsd, 0, Number.MAX_SAFE_INTEGER);
+      const safeCost = clampNumber(costUsd, 0, Number.MAX_SAFE_INTEGER);
 
-    if (safeCost === 0) {
-      return store.articles[articleIndex];
-    }
+      if (safeCost === 0) {
+        return { value: store.articles[articleIndex] };
+      }
 
-    const now = new Date().toISOString();
-    const article = store.articles[articleIndex];
-    const updatedArticle: Article = {
-      ...article,
-      updatedAt: now,
-      processingCostUsd: roundCost((article.processingCostUsd ?? 0) + safeCost),
-    };
-    const nextArticles = [...store.articles];
-    nextArticles[articleIndex] = updatedArticle;
+      const now = new Date().toISOString();
+      const article = store.articles[articleIndex];
+      const updatedArticle: Article = {
+        ...article,
+        updatedAt: now,
+        processingCostUsd: roundCost(
+          (article.processingCostUsd ?? 0) + safeCost,
+        ),
+      };
+      const nextArticles = [...store.articles];
+      nextArticles[articleIndex] = updatedArticle;
 
-    await this.writeStore({
-      ...store,
-      articles: nextArticles,
+      return {
+        store: {
+          ...store,
+          articles: nextArticles,
+        },
+        value: updatedArticle,
+      };
     });
-
-    return updatedArticle;
   }
 
   async deleteById(id: string, ownerEmail: string) {
-    const store = await this.readStore();
-    const nextArticles = store.articles.filter(
-      (article) => article.id !== id || !articleBelongsToOwner(article, ownerEmail),
-    );
+    return this.mutateStore((store) => {
+      const nextArticles = store.articles.filter(
+        (article) =>
+          article.id !== id || !articleBelongsToOwner(article, ownerEmail),
+      );
 
-    if (nextArticles.length === store.articles.length) {
-      return false;
-    }
+      if (nextArticles.length === store.articles.length) {
+        return { value: false };
+      }
 
-    await this.writeStore({
-      ...store,
-      articles: nextArticles,
+      return {
+        store: {
+          ...store,
+          articles: nextArticles,
+        },
+        value: true,
+      };
     });
+  }
 
-    return true;
+  private async readCurrentStore() {
+    await this.mutationQueue;
+    return this.readStore();
   }
 
   private async readStore(): Promise<ArticleStore> {
@@ -162,15 +195,30 @@ export class LocalJsonArticleRepository implements ArticleRepository {
     }
   }
 
-  private async writeStore(store: ArticleStore) {
-    this.writeQueue = this.writeQueue.then(async () => {
-      await fs.mkdir(path.dirname(this.storePath), { recursive: true });
-      const tempPath = `${this.storePath}.${process.pid}.tmp`;
-      await fs.writeFile(tempPath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
-      await fs.rename(tempPath, this.storePath);
-    });
+  private mutateStore<T>(
+    mutation: (store: ArticleStore) => StoreMutation<T>,
+  ): Promise<T> {
+    const operation = this.mutationQueue.then(async () => {
+      const result = mutation(await this.readStore());
 
-    await this.writeQueue;
+      if (result.store) {
+        await this.writeStore(result.store);
+      }
+
+      return result.value;
+    });
+    this.mutationQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async writeStore(store: ArticleStore) {
+    await fs.mkdir(path.dirname(this.storePath), { recursive: true });
+    const tempPath = `${this.storePath}.${process.pid}.tmp`;
+    await fs.writeFile(tempPath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+    await fs.rename(tempPath, this.storePath);
   }
 }
 

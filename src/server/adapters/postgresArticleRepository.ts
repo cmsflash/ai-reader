@@ -80,12 +80,23 @@ export class PostgresArticleRepository implements ArticleRepository {
           blocks
         )
         VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8, $9, $10, $11, $12, $13, $14::timestamptz, $15, $16, $17::jsonb)
+        ON CONFLICT (id) DO NOTHING
         RETURNING ${articleColumns}
       `,
       [article.id, normalizeOwnerEmail(ownerEmail), ...articleParams(article).slice(1)],
     );
 
-    return rowToArticle(saved[0]);
+    if (saved[0]) {
+      return rowToArticle(saved[0]);
+    }
+
+    const existing = await this.findById(article.id, ownerEmail);
+
+    if (existing) {
+      return existing;
+    }
+
+    throw new Error("An article with this identifier already belongs to another owner.");
   }
 
   async updateProgress(id: string, ownerEmail: string, progress: ArticleProgressPatch) {

@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
-import { requireAppUser } from "@/server/auth/access";
+import {
+  requireAppUser,
+  requireIntegrationOwnerResponse,
+} from "@/server/auth/access";
 import {
   getInstapaperConfigurationStatus,
+  InstapaperApiError,
   type InstapaperBookmarkListInput,
 } from "@/server/integrations/instapaperClient";
 import { syncInstapaperArticles } from "@/server/integrations/providerSync";
@@ -16,6 +20,12 @@ export async function POST(request: Request) {
     return auth.response;
   }
 
+  const ownerError = requireIntegrationOwnerResponse(auth.user.email);
+
+  if (ownerError) {
+    return ownerError;
+  }
+
   const configuration = getInstapaperConfigurationStatus();
 
   if (!configuration.configured) {
@@ -25,12 +35,40 @@ export async function POST(request: Request) {
     );
   }
 
+  let body: {
+    folder?: string;
+    batchSize?: number;
+  };
+
   try {
-    const body = (await request.json().catch(() => ({}))) as {
+    body = (await request.json()) as {
       folder?: string;
       batchSize?: number;
     };
-    const folder = normalizeFolder(body.folder);
+  } catch {
+    return NextResponse.json(
+      { error: "Request body must be valid JSON." },
+      { status: 400 },
+    );
+  }
+
+  let folder: InstapaperBookmarkListInput["folderId"];
+
+  try {
+    folder = normalizeFolder(body.folder);
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Choose a valid Instapaper folder.",
+      },
+      { status: 400 },
+    );
+  }
+
+  try {
     const result = await syncInstapaperArticles({
       ownerEmail: auth.user.email,
       folder,
@@ -39,14 +77,23 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result);
   } catch (error) {
+    if (error instanceof InstapaperApiError) {
+      const status =
+        error.status === 429 || error.apiCode === 1040
+          ? 429
+          : error.kind === "configuration"
+            ? 503
+            : 502;
+
+      return NextResponse.json(
+        { error: error.message },
+        { status },
+      );
+    }
+
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Could not sync Instapaper.",
-      },
-      { status: 400 },
+      { error: "Could not sync Instapaper." },
+      { status: 500 },
     );
   }
 }

@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { getAllowedEmails } from "@/server/auth/config";
+import { getAllowedEmails } from "./config.ts";
 
 export type ImportTokenUser = {
   email: string;
@@ -29,7 +29,7 @@ export function requireImportToken(request: Request): ImportTokenUser | null {
 
 function importTokenOwnerEmail() {
   return (
-    process.env.AI_READER_IMPORT_OWNER_EMAIL?.trim().toLowerCase() ??
+    process.env.AI_READER_IMPORT_OWNER_EMAIL?.trim().toLowerCase() ||
     getAllowedEmails()[0]
   );
 }

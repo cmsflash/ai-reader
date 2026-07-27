@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
-import { requireAppUser } from "@/server/auth/access";
+import {
+  requireAppUser,
+  requireIntegrationOwnerResponse,
+} from "@/server/auth/access";
 import { importTokenConfigured } from "@/server/auth/importToken";
 import {
+  createDropboxReadClient,
   DROPBOX_ATVOICE_FOLDER,
   getDropboxConfiguredStatus,
 } from "@/server/integrations/dropboxClient";
@@ -25,11 +29,18 @@ export async function GET() {
     return auth.response;
   }
 
+  const ownerError = requireIntegrationOwnerResponse(auth.user.email);
+
+  if (ownerError) {
+    return ownerError;
+  }
+
   const instapaperConfiguration = getInstapaperConfigurationStatus();
   const dropboxConfiguration = getDropboxConfiguredStatus();
   let instapaperUsername: string | undefined;
   let instapaperFolders = defaultInstapaperFolders;
   let instapaperMessage: string | undefined;
+  let dropboxMessage: string | undefined;
 
   if (instapaperConfiguration.configured) {
     try {
@@ -52,16 +63,28 @@ export async function GET() {
     }
   }
 
+  if (dropboxConfiguration.configured) {
+    try {
+      await createDropboxReadClient().listAtVoiceFiles();
+    } catch (error) {
+      dropboxMessage = messageFromError(error);
+    }
+  }
+
   return NextResponse.json({
     instapaper: {
       configured: instapaperConfiguration.configured,
+      connected:
+        instapaperConfiguration.configured && !instapaperMessage,
       username: instapaperUsername,
       folders: instapaperFolders,
       message: instapaperMessage,
     },
     dropbox: {
       configured: dropboxConfiguration.configured,
+      connected: dropboxConfiguration.configured && !dropboxMessage,
       folder: DROPBOX_ATVOICE_FOLDER,
+      message: dropboxMessage,
     },
     personalImports: {
       configured: importTokenConfigured(),

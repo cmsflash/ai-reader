@@ -1,4 +1,6 @@
 export const DROPBOX_ATVOICE_FOLDER = "/Apps/@Voice";
+export const DEFAULT_DROPBOX_MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_DROPBOX_REQUEST_TIMEOUT_MS = 15_000;
 
 const DROPBOX_TOKEN_URL = "https://api.dropboxapi.com/oauth2/token";
 const DROPBOX_LIST_FOLDER_URL =
@@ -9,6 +11,7 @@ const DROPBOX_DOWNLOAD_URL =
   "https://content.dropboxapi.com/2/files/download";
 const TOKEN_REFRESH_SAFETY_MS = 60_000;
 const DEFAULT_TOKEN_LIFETIME_MS = 4 * 60 * 60 * 1_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 const DROPBOX_ENVIRONMENT_VARIABLES = [
   "DROPBOX_APP_KEY",
@@ -25,6 +28,15 @@ type CachedAccessToken = {
   accessToken: string;
   refreshAt: number;
 };
+
+type DropboxRequestAttempt<T> =
+  | {
+      kind: "retry-with-fresh-token";
+    }
+  | {
+      kind: "success";
+      value: T;
+    };
 
 type DropboxListFolderPage = {
   cursor: string;
@@ -80,7 +92,9 @@ export type DropboxReadClient = {
 export type DropboxReadClientOptions = {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof globalThis.fetch;
+  maxDownloadBytes?: number;
   now?: () => number;
+  requestTimeoutMs?: number;
 };
 
 export class DropboxClientError extends Error {
@@ -112,7 +126,18 @@ export function createDropboxReadClient(
   const env = options.env ?? process.env;
   const status = getDropboxConfiguredStatus(env);
   const fetchImpl = options.fetch ?? globalThis.fetch;
+  const maxDownloadBytes = positiveIntegerOption(
+    options.maxDownloadBytes,
+    DEFAULT_DROPBOX_MAX_DOWNLOAD_BYTES,
+    "Dropbox maximum download size",
+  );
   const now = options.now ?? Date.now;
+  const requestTimeoutMs = positiveIntegerOption(
+    options.requestTimeoutMs,
+    DEFAULT_DROPBOX_REQUEST_TIMEOUT_MS,
+    "Dropbox request timeout",
+    MAX_TIMER_DELAY_MS,
+  );
   let cachedToken: CachedAccessToken | null = null;
   let refreshInFlight: Promise<CachedAccessToken> | null = null;
 
@@ -151,73 +176,117 @@ export function createDropboxReadClient(
 
   async function downloadFile(pathOrId: string) {
     const reference = normalizeDownloadReference(pathOrId);
-    const response = await authorizedRequest(DROPBOX_DOWNLOAD_URL, {
-      method: "POST",
-      headers: {
-        "Dropbox-API-Arg": encodeDropboxApiArgument({ path: reference }),
+    return authorizedRequest(
+      DROPBOX_DOWNLOAD_URL,
+      {
+        method: "POST",
+        headers: {
+          "Dropbox-API-Arg": encodeDropboxApiArgument({ path: reference }),
+        },
       },
-    });
-
-    return new Uint8Array(await response.arrayBuffer());
+      (response) => readDropboxDownload(response, maxDownloadBytes),
+    );
   }
 
   async function authorizedJsonRequest<T>(
     url: string,
     body: Record<string, unknown>,
   ) {
-    const response = await authorizedRequest(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
+    return authorizedRequest(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
-    const payload: unknown = await response.json();
+      async (response) => {
+        const payload: unknown = await response.json();
 
-    if (!isListFolderPage(payload)) {
-      throw new DropboxClientError(
-        "Dropbox returned an invalid list-folder response.",
+        if (!isListFolderPage(payload)) {
+          throw new DropboxClientError(
+            "Dropbox returned an invalid list-folder response.",
+          );
+        }
+
+        return payload as T;
+      },
+    );
+  }
+
+  async function authorizedRequest<T>(
+    url: string,
+    init: RequestInit,
+    readResponse: (response: Response) => Promise<T>,
+  ): Promise<T> {
+    let accessToken = await getAccessToken();
+    let attempt = await performRequest(
+      url,
+      init,
+      accessToken,
+      readResponse,
+      true,
+    );
+
+    if (attempt.kind === "retry-with-fresh-token") {
+      cachedToken = null;
+      accessToken = await getAccessToken();
+      attempt = await performRequest(
+        url,
+        init,
+        accessToken,
+        readResponse,
+        false,
       );
     }
 
-    return payload as T;
-  }
-
-  async function authorizedRequest(url: string, init: RequestInit) {
-    let accessToken = await getAccessToken();
-    let response = await performRequest(url, init, accessToken);
-
-    if (response.status === 401) {
-      cachedToken = null;
-      accessToken = await getAccessToken();
-      response = await performRequest(url, init, accessToken);
+    if (attempt.kind === "retry-with-fresh-token") {
+      throw new DropboxClientError(
+        "Dropbox rejected a freshly refreshed access token.",
+        { status: 401 },
+      );
     }
 
-    if (!response.ok) {
-      throw await dropboxResponseError(response, url);
-    }
-
-    return response;
+    return attempt.value;
   }
 
-  async function performRequest(
+  async function performRequest<T>(
     url: string,
     init: RequestInit,
     accessToken: string,
-  ) {
-    try {
-      return await requireFetch(fetchImpl)(url, {
+    readResponse: (response: Response) => Promise<T>,
+    retryUnexpectedUnauthorized: boolean,
+  ): Promise<DropboxRequestAttempt<T>> {
+    return timedFetch<DropboxRequestAttempt<T>>(
+      url,
+      {
         ...init,
         headers: {
           ...headersToObject(init.headers),
           Authorization: `Bearer ${accessToken}`,
         },
-      });
-    } catch (error) {
-      throw new DropboxClientError("Could not reach the Dropbox API.", {
-        cause: error,
-      });
-    }
+      },
+      async (response) => {
+        if (response.status === 401 && retryUnexpectedUnauthorized) {
+          await cancelResponseBody(response);
+          return { kind: "retry-with-fresh-token" };
+        }
+
+        if (!response.ok) {
+          throw await dropboxResponseError(response, url);
+        }
+
+        return {
+          kind: "success",
+          value: await readResponse(response),
+        };
+      },
+      {
+        networkMessage: "Could not reach the Dropbox API.",
+        timeoutMessage: "Dropbox API request timed out.",
+      },
+    );
   }
 
   async function getAccessToken() {
@@ -243,46 +312,103 @@ export function createDropboxReadClient(
       client_id: credentials.DROPBOX_APP_KEY,
       client_secret: credentials.DROPBOX_APP_SECRET,
     });
-    let response: Response;
-
-    try {
-      response = await requireFetch(fetchImpl)(DROPBOX_TOKEN_URL, {
+    return timedFetch(
+      DROPBOX_TOKEN_URL,
+      {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
         },
         body: form,
-      });
-    } catch (error) {
-      throw new DropboxClientError(
-        "Could not exchange the Dropbox refresh token.",
-        { cause: error },
-      );
+      },
+      async (response) => {
+        if (!response.ok) {
+          throw await dropboxResponseError(response, DROPBOX_TOKEN_URL);
+        }
+
+        const payload: unknown = await response.json();
+
+        if (
+          !isRecord(payload) ||
+          typeof payload.access_token !== "string" ||
+          !payload.access_token.trim()
+        ) {
+          throw new DropboxClientError(
+            "Dropbox returned an invalid access-token response.",
+          );
+        }
+
+        const issuedAt = now();
+        const lifetimeMs =
+          typeof payload.expires_in === "number" && payload.expires_in > 0
+            ? payload.expires_in * 1_000
+            : DEFAULT_TOKEN_LIFETIME_MS;
+        const safetyMs = Math.min(TOKEN_REFRESH_SAFETY_MS, lifetimeMs / 2);
+
+        return {
+          accessToken: payload.access_token,
+          refreshAt: issuedAt + lifetimeMs - safetyMs,
+        };
+      },
+      {
+        networkMessage: "Could not exchange the Dropbox refresh token.",
+        timeoutMessage: "Dropbox token exchange timed out.",
+      },
+    );
+  }
+
+  async function timedFetch<T>(
+    url: string,
+    init: RequestInit,
+    readResponse: (response: Response) => Promise<T>,
+    messages: {
+      networkMessage: string;
+      timeoutMessage: string;
+    },
+  ) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+
+    try {
+      let response: Response;
+
+      try {
+        response = await requireFetch(fetchImpl)(url, {
+          ...init,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (error instanceof DropboxClientError) {
+          throw error;
+        }
+
+        if (controller.signal.aborted) {
+          throw new DropboxClientError(
+            `${messages.timeoutMessage} Limit: ${requestTimeoutMs} ms.`,
+            { cause: error },
+          );
+        }
+
+        throw new DropboxClientError(messages.networkMessage, {
+          cause: error,
+        });
+      }
+
+      try {
+        return await readResponse(response);
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw new DropboxClientError(
+            `${messages.timeoutMessage} Limit: ${requestTimeoutMs} ms.`,
+            { cause: error },
+          );
+        }
+
+        throw error;
+      }
+    } finally {
+      clearTimeout(timeout);
     }
-
-    if (!response.ok) {
-      throw await dropboxResponseError(response, DROPBOX_TOKEN_URL);
-    }
-
-    const payload: unknown = await response.json();
-
-    if (!isRecord(payload) || typeof payload.access_token !== "string") {
-      throw new DropboxClientError(
-        "Dropbox returned an invalid access-token response.",
-      );
-    }
-
-    const issuedAt = now();
-    const lifetimeMs =
-      typeof payload.expires_in === "number" && payload.expires_in > 0
-        ? payload.expires_in * 1_000
-        : DEFAULT_TOKEN_LIFETIME_MS;
-    const safetyMs = Math.min(TOKEN_REFRESH_SAFETY_MS, lifetimeMs / 2);
-
-    return {
-      accessToken: payload.access_token,
-      refreshAt: issuedAt + lifetimeMs - safetyMs,
-    };
   }
 
   return {
@@ -290,6 +416,102 @@ export function createDropboxReadClient(
     downloadFile,
     listAtVoiceFiles,
   };
+}
+
+async function readDropboxDownload(response: Response, maxBytes: number) {
+  const declaredLength = response.headers.get("content-length")?.trim();
+
+  if (declaredLength && /^\d+$/.test(declaredLength)) {
+    const parsedLength = Number(declaredLength);
+
+    if (!Number.isSafeInteger(parsedLength) || parsedLength > maxBytes) {
+      await cancelResponseBody(response);
+      throw downloadTooLargeError(maxBytes);
+    }
+  }
+
+  if (!response.body) {
+    return new Uint8Array();
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      if (!value || value.byteLength === 0) {
+        continue;
+      }
+
+      byteLength += value.byteLength;
+
+      if (byteLength > maxBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The size-limit error below is the actionable failure.
+        }
+
+        throw downloadTooLargeError(maxBytes);
+      }
+
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return bytes;
+}
+
+async function cancelResponseBody(response: Response) {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // A response that is already closed or locked needs no further cleanup.
+  }
+}
+
+function downloadTooLargeError(maxBytes: number) {
+  return new DropboxClientError(
+    `Dropbox file exceeds the configured ${maxBytes}-byte download limit.`,
+  );
+}
+
+function positiveIntegerOption(
+  value: number | undefined,
+  fallback: number,
+  label: string,
+  maximum = Number.MAX_SAFE_INTEGER,
+) {
+  const normalized = value ?? fallback;
+
+  if (
+    !Number.isSafeInteger(normalized) ||
+    normalized < 1 ||
+    normalized > maximum
+  ) {
+    throw new DropboxClientError(
+      `${label} must be a positive safe integer no greater than ${maximum}.`,
+    );
+  }
+
+  return normalized;
 }
 
 function readCredentials(
