@@ -242,20 +242,8 @@ export function createInstapaperClient(options: InstapaperClientOptions = {}): I
       const endpoint = `${instapaperApiBaseUrl}/bookmarks/list`;
       const parameters = bookmarkListParameters(input, endpoint);
       const payload = await requestWithRetry(dependencies, endpoint, parameters, "json");
-      const object = asRecord(payload);
 
-      if (!object || !Array.isArray(object.bookmarks)) {
-        throw invalidResponseError(endpoint, "The response did not contain a bookmarks list.");
-      }
-
-      return {
-        user: parseUser(object.user, endpoint),
-        bookmarks: object.bookmarks.map((bookmark) => parseBookmark(bookmark, endpoint)),
-        highlights: arrayValue(object.highlights).map((highlight) =>
-          parseHighlight(highlight, endpoint),
-        ),
-        delete_ids: arrayValue(object.delete_ids).map((id) => parseDeleteId(id, endpoint)),
-      };
+      return parseBookmarkList(payload, endpoint);
     },
 
     async getText(bookmarkId) {
@@ -757,6 +745,45 @@ function standardArray(payload: unknown, endpoint: string) {
   }
 
   return payload;
+}
+
+function parseBookmarkList(payload: unknown, endpoint: string): InstapaperBookmarkList {
+  const object = asRecord(payload);
+
+  if (object && Array.isArray(object.bookmarks)) {
+    return {
+      user: parseUser(object.user, endpoint),
+      bookmarks: object.bookmarks.map((bookmark) => parseBookmark(bookmark, endpoint)),
+      highlights: arrayValue(object.highlights).map((highlight) =>
+        parseHighlight(highlight, endpoint),
+      ),
+      delete_ids: arrayValue(object.delete_ids).map((id) => parseDeleteId(id, endpoint)),
+    };
+  }
+
+  if (Array.isArray(payload)) {
+    const user = payload.find(isObjectWithType("user"));
+    const meta = payload.find(isObjectWithType("meta"));
+
+    if (!user) {
+      throw invalidResponseError(endpoint, "The response did not contain an Instapaper user.");
+    }
+
+    return {
+      user: parseUser(user, endpoint),
+      bookmarks: payload
+        .filter(isObjectWithType("bookmark"))
+        .map((bookmark) => parseBookmark(bookmark, endpoint)),
+      highlights: payload
+        .filter(isObjectWithType("highlight"))
+        .map((highlight) => parseHighlight(highlight, endpoint)),
+      delete_ids: arrayValue(asRecord(meta)?.delete_ids).map((id) =>
+        parseDeleteId(id, endpoint),
+      ),
+    };
+  }
+
+  throw invalidResponseError(endpoint, "The response did not contain a bookmarks list.");
 }
 
 function parseUser(value: unknown, endpoint: string): InstapaperUser {

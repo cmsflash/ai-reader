@@ -161,6 +161,64 @@ test("parses verify-credentials, folder, bookmark, highlight, and text responses
   );
 });
 
+test("accepts the legacy flattened bookmarks-list response", async () => {
+  const client = createInstapaperClient({
+    credentials,
+    ...fixedClock,
+    fetch: async () => jsonResponse([
+      { type: "meta", delete_ids: bookmarkListPayload.delete_ids },
+      bookmarkListPayload.user,
+      ...bookmarkListPayload.bookmarks,
+      ...bookmarkListPayload.highlights,
+    ]),
+  });
+
+  const listed = await client.listBookmarks();
+
+  assert.equal(listed.user.user_id, 42);
+  assert.equal(listed.bookmarks.length, 1);
+  assert.equal(listed.highlights.length, 1);
+  assert.deepEqual(listed.delete_ids, [91, "92"]);
+});
+
+test("tolerates legacy bookmarks lists without metadata", async () => {
+  const client = createInstapaperClient({
+    credentials,
+    ...fixedClock,
+    fetch: async () => jsonResponse([
+      bookmarkListPayload.user,
+      { type: "unknown", ignored: true },
+    ]),
+  });
+
+  const listed = await client.listBookmarks();
+
+  assert.deepEqual(listed.bookmarks, []);
+  assert.deepEqual(listed.highlights, []);
+  assert.deepEqual(listed.delete_ids, []);
+});
+
+test("rejects legacy bookmarks lists without a user", async () => {
+  const client = createInstapaperClient({
+    credentials,
+    ...fixedClock,
+    fetch: async () => jsonResponse([
+      { type: "meta", delete_ids: [] },
+      ...bookmarkListPayload.bookmarks,
+    ]),
+  });
+
+  await assert.rejects(
+    () => client.listBookmarks(),
+    (error) => {
+      assert.ok(error instanceof InstapaperApiError);
+      assert.equal(error.kind, "invalid-response");
+      assert.equal(error.apiMessage, "The response did not contain an Instapaper user.");
+      return true;
+    },
+  );
+});
+
 test("backs off and retries a documented API rate-limit error", async () => {
   let attempts = 0;
   const delays = [];
