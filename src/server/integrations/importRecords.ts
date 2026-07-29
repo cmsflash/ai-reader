@@ -31,6 +31,11 @@ type ImportRecordInput = {
   metadata?: Record<string, unknown>;
 };
 
+type ImportCompletionDetails = {
+  sourceUrl?: string;
+  metadata?: Record<string, unknown>;
+};
+
 type ImportRecordRow = {
   owner_email: string;
   provider: string;
@@ -230,6 +235,7 @@ export async function markImportCompleted(
   externalId: string,
   articleId: string,
   attemptId: string,
+  details: ImportCompletionDetails = {},
 ) {
   return updateImportStatus({
     ownerEmail,
@@ -238,6 +244,8 @@ export async function markImportCompleted(
     status: "completed",
     articleId,
     attemptId,
+    sourceUrl: details.sourceUrl,
+    metadata: details.metadata,
   });
 }
 
@@ -247,6 +255,7 @@ export async function markImportCompletedReconciled(
   externalId: string,
   articleId: string,
   attemptId: string,
+  details: ImportCompletionDetails = {},
 ) {
   try {
     return await markImportCompleted(
@@ -255,6 +264,7 @@ export async function markImportCompletedReconciled(
       externalId,
       articleId,
       attemptId,
+      details,
     );
   } catch (error) {
     try {
@@ -325,6 +335,37 @@ export async function listImportRecords(ownerEmail: string, provider: string) {
   )) as ImportRecordRow[];
 
   return rows.map(rowToRecord);
+}
+
+export async function hasActiveImportReference(
+  ownerEmail: string,
+  articleId: string,
+) {
+  const normalizedOwner = normalizeOwnerEmail(ownerEmail);
+
+  if (!hasProductionDatabase()) {
+    return Array.from(localRecords.values()).some(
+      (record) =>
+        record.ownerEmail === normalizedOwner &&
+        record.status !== "dismissed" &&
+        record.articleId === articleId,
+    );
+  }
+
+  const rows = (await getDatabaseSql().query(
+    `
+      SELECT 1
+      FROM external_imports
+      WHERE
+        owner_email = $1
+        AND status <> 'dismissed'
+        AND article_id = $2
+      LIMIT 1
+    `,
+    [normalizedOwner, articleId],
+  )) as Array<{ "?column?": number }>;
+
+  return rows.length > 0;
 }
 
 export function dismissLocalImportsForArticle(
@@ -419,6 +460,8 @@ async function updateImportStatus(input: {
   articleId?: string;
   errorMessage?: string;
   attemptId: string;
+  sourceUrl?: string;
+  metadata?: Record<string, unknown>;
 }) {
   const ownerEmail = normalizeOwnerEmail(input.ownerEmail);
   const now = new Date().toISOString();
@@ -447,6 +490,11 @@ async function updateImportStatus(input: {
       articleId: input.articleId ?? existing.articleId,
       attemptId: undefined,
       errorMessage: input.errorMessage,
+      sourceUrl: input.sourceUrl ?? existing.sourceUrl,
+      metadata: {
+        ...existing.metadata,
+        ...(input.metadata ?? {}),
+      },
       updatedAt: now,
     };
     localRecords.set(key, record);
@@ -469,7 +517,9 @@ async function updateImportStatus(input: {
         article_id = COALESCE($5, article_id),
         attempt_id = NULL,
         error_message = $6,
-        updated_at = $7::timestamptz
+        updated_at = $7::timestamptz,
+        source_url = COALESCE($9, source_url),
+        metadata = metadata || $10::jsonb
       WHERE
         owner_email = $1
         AND provider = $2
@@ -501,6 +551,8 @@ async function updateImportStatus(input: {
       input.errorMessage ?? null,
       now,
       input.attemptId,
+      input.sourceUrl ?? null,
+      JSON.stringify(input.metadata ?? {}),
     ],
   )) as ImportRecordRow[];
 

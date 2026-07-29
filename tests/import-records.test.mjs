@@ -6,6 +6,7 @@ import {
   clearImportCleanupArticle,
   dismissLocalImportsForArticle,
   findImportRecord,
+  hasActiveImportReference,
   isImportRecordClaimable,
   markImportCompleted,
   markImportFailed,
@@ -97,6 +98,10 @@ test("changed sources replace through a new lease while failures preserve the ol
   );
   assert.equal(failed?.status, "failed");
   assert.equal(failed?.articleId, "article-1");
+  assert.equal(
+    await hasActiveImportReference(ownerEmail, "article-1"),
+    true,
+  );
 
   const retry = await claimImport(
     {
@@ -316,5 +321,76 @@ test("strict claims bind an idempotency key to its first source hash", async () 
       })
     )?.attemptId,
     "strict-attempt-3",
+  );
+});
+
+test("shared canonical articles retain every provider provenance record", async () => {
+  const ownerEmail = `provenance-${crypto.randomUUID()}@example.com`;
+  const articleId = "shared-canonical-article";
+  const instapaper = await claimImport(
+    {
+      ownerEmail,
+      provider: "instapaper",
+      externalId: "bookmark-1",
+      sourceHash: "instapaper-hash",
+      sourceTitle: "Canonical story",
+      sourceUrl: "https://example.com/story",
+      metadata: { folder: "unread" },
+    },
+    { attemptId: "instapaper-attempt" },
+  );
+  const dropbox = await claimImport(
+    {
+      ownerEmail,
+      provider: "dropbox-atvoice",
+      externalId: "dropbox-file-1",
+      sourceHash: "dropbox-hash",
+      sourceTitle: "Canonical story.mhtml",
+      metadata: { path: "/Apps/@Voice/Canonical story.mhtml" },
+    },
+    { attemptId: "dropbox-attempt" },
+  );
+
+  await markImportCompleted(
+    ownerEmail,
+    "instapaper",
+    "bookmark-1",
+    articleId,
+    instapaper.attemptId,
+  );
+  await markImportCompleted(
+    ownerEmail,
+    "dropbox-atvoice",
+    "dropbox-file-1",
+    articleId,
+    dropbox.attemptId,
+    {
+      sourceUrl: "https://example.com/story",
+      metadata: {
+        deduplication: {
+          articleId,
+          reason: "exact-content",
+          similarity: 1,
+        },
+      },
+    },
+  );
+
+  const storedDropbox = await findImportRecord(
+    ownerEmail,
+    "dropbox-atvoice",
+    "dropbox-file-1",
+  );
+  assert.equal(storedDropbox?.articleId, articleId);
+  assert.equal(storedDropbox?.sourceUrl, "https://example.com/story");
+  assert.equal(storedDropbox?.metadata.path, "/Apps/@Voice/Canonical story.mhtml");
+  assert.deepEqual(storedDropbox?.metadata.deduplication, {
+    articleId,
+    reason: "exact-content",
+    similarity: 1,
+  });
+  assert.equal(
+    await hasActiveImportReference(ownerEmail, articleId),
+    true,
   );
 });

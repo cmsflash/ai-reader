@@ -6,6 +6,7 @@ import {
   Download,
   FileText,
   Link as LinkIcon,
+  MessageCircle,
   Pause,
   Play,
   Plus,
@@ -18,6 +19,10 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import {
+  ArticleDiscussion,
+  type ArticleDiscussionScope,
+} from "@/components/ArticleDiscussion";
 import { AuthSignOutButton } from "@/components/AuthSignOutButton";
 import { annotateBlocks, type AnnotatedBlock, type SentenceSegment } from "@/lib/sentences";
 import type { Article, ArticleSummary, SourceType } from "@/lib/types";
@@ -78,6 +83,8 @@ type IntegrationStatusResponse = {
 
 type IntegrationSyncResponse = {
   imported: number;
+  deduplicated: number;
+  reconciled: number;
   failed: number;
   skipped: number;
   remaining: number;
@@ -93,6 +100,15 @@ type IntegrationSyncResponse = {
 type IntegrationProvider = "instapaper" | "dropbox";
 
 const integrationBatchSize = 5;
+const wholeArticleDiscussionScope: ArticleDiscussionScope = { kind: "whole" };
+const maxDiscussionSelectionCharacters = 24_000;
+
+type SelectionDiscussionAction = {
+  text: string;
+  left: number;
+  top: number;
+  tooLong: boolean;
+};
 
 export function ReaderApp() {
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
@@ -115,8 +131,14 @@ export function ReaderApp() {
   const [instapaperFolder, setInstapaperFolder] = useState("unread");
   const [syncingIntegration, setSyncingIntegration] =
     useState<IntegrationProvider | null>(null);
+  const [discussionOpen, setDiscussionOpen] = useState(false);
+  const [discussionScope, setDiscussionScope] =
+    useState<ArticleDiscussionScope>(wholeArticleDiscussionScope);
+  const [selectionDiscussionAction, setSelectionDiscussionAction] =
+    useState<SelectionDiscussionAction | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const articleBodyRef = useRef<HTMLElement | null>(null);
   const articleIdRef = useRef<string | null>(null);
   const sentencesRef = useRef<SentenceSegment[]>([]);
   const speechSessionRef = useRef(0);
@@ -156,6 +178,35 @@ export function ReaderApp() {
   useEffect(() => {
     articleIdRef.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    setDiscussionOpen(false);
+    setDiscussionScope(wholeArticleDiscussionScope);
+    setSelectionDiscussionAction(null);
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (!selectionDiscussionAction) {
+      return;
+    }
+
+    const dismissSelectionAction = () => setSelectionDiscussionAction(null);
+    const dismissIfSelectionCleared = () => {
+      if (window.getSelection()?.isCollapsed) {
+        dismissSelectionAction();
+      }
+    };
+
+    window.addEventListener("resize", dismissSelectionAction);
+    document.addEventListener("scroll", dismissSelectionAction, true);
+    document.addEventListener("selectionchange", dismissIfSelectionCleared);
+
+    return () => {
+      window.removeEventListener("resize", dismissSelectionAction);
+      document.removeEventListener("scroll", dismissSelectionAction, true);
+      document.removeEventListener("selectionchange", dismissIfSelectionCleared);
+    };
+  }, [selectionDiscussionAction]);
 
   useEffect(() => {
     sentencesRef.current = annotated.sentences;
@@ -483,6 +534,10 @@ export function ReaderApp() {
 
   const handleSentenceTap = useCallback(
     (sentenceIndex: number) => {
+      if (!window.getSelection()?.isCollapsed) {
+        return;
+      }
+
       const now = Date.now();
       const lastTap = lastTapRef.current;
 
@@ -499,6 +554,83 @@ export function ReaderApp() {
     },
     [resumeFromSentence],
   );
+
+  const captureArticleSelection = useCallback(() => {
+    const root = articleBodyRef.current;
+    const selection = window.getSelection();
+
+    if (!root || !selection || selection.isCollapsed || selection.rangeCount === 0) {
+      setSelectionDiscussionAction(null);
+      return;
+    }
+
+    const { anchorNode, focusNode } = selection;
+
+    if (
+      !anchorNode ||
+      !focusNode ||
+      !root.contains(anchorNode) ||
+      !root.contains(focusNode)
+    ) {
+      setSelectionDiscussionAction(null);
+      return;
+    }
+
+    const text = selection.toString().replace(/\s+/g, " ").trim();
+
+    if (!text) {
+      setSelectionDiscussionAction(null);
+      return;
+    }
+
+    const bounds = selection.getRangeAt(0).getBoundingClientRect();
+    const actionWidth = 212;
+    const gutter = 12;
+    const aboveSelection = bounds.top - 48;
+    const top =
+      aboveSelection >= gutter
+        ? aboveSelection
+        : Math.min(bounds.bottom + 10, window.innerHeight - 50);
+
+    setSelectionDiscussionAction({
+      text,
+      tooLong: text.length > maxDiscussionSelectionCharacters,
+      left: Math.min(
+        Math.max(bounds.left + bounds.width / 2 - actionWidth / 2, gutter),
+        window.innerWidth - actionWidth - gutter,
+      ),
+      top,
+    });
+  }, []);
+
+  const openWholeArticleDiscussion = useCallback(() => {
+    window.getSelection()?.removeAllRanges();
+    setSelectionDiscussionAction(null);
+    setDiscussionScope(wholeArticleDiscussionScope);
+    setDiscussionOpen(true);
+  }, []);
+
+  const openSelectionDiscussion = useCallback(() => {
+    if (!selectionDiscussionAction || selectionDiscussionAction.tooLong) {
+      return;
+    }
+
+    setDiscussionScope({
+      kind: "selection",
+      text: selectionDiscussionAction.text,
+    });
+    setDiscussionOpen(true);
+    setSelectionDiscussionAction(null);
+    window.getSelection()?.removeAllRanges();
+  }, [selectionDiscussionAction]);
+
+  const closeDiscussion = useCallback(() => {
+    setDiscussionOpen(false);
+  }, []);
+
+  const switchDiscussionToWholeArticle = useCallback(() => {
+    setDiscussionScope(wholeArticleDiscussionScope);
+  }, []);
 
   async function handleUrlSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -908,6 +1040,14 @@ export function ReaderApp() {
 
               <div className="reader-actions">
                 <button
+                  className="secondary-button discuss-article-button"
+                  type="button"
+                  onClick={openWholeArticleDiscussion}
+                >
+                  <MessageCircle size={18} />
+                  Discuss
+                </button>
+                <button
                   className="round-button primary"
                   type="button"
                   title={isSpeaking ? "Pause" : "Read aloud"}
@@ -950,7 +1090,12 @@ export function ReaderApp() {
             </div>
 
             <div className="reader-scroll">
-              <article className="article-body">
+              <article
+                ref={articleBodyRef}
+                className="article-body"
+                onPointerUp={captureArticleSelection}
+                onKeyUp={captureArticleSelection}
+              >
                 {annotated.blocks.map((block) => (
                   <ArticleBlockView
                     key={block.id}
@@ -965,6 +1110,40 @@ export function ReaderApp() {
           </>
         )}
       </section>
+      {selectionDiscussionAction && !discussionOpen ? (
+        <button
+          className="selection-discuss-button"
+          type="button"
+          style={{
+            left: selectionDiscussionAction.left,
+            top: selectionDiscussionAction.top,
+          }}
+          disabled={selectionDiscussionAction.tooLong}
+          title={
+            selectionDiscussionAction.tooLong
+              ? "Select a shorter passage (24,000 characters or fewer)."
+              : "Discuss only the selected passage"
+          }
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={openSelectionDiscussion}
+        >
+          <MessageCircle size={16} />
+          {selectionDiscussionAction.tooLong
+            ? "Select a shorter passage"
+            : "Discuss selection"}
+        </button>
+      ) : null}
+      {article ? (
+        <ArticleDiscussion
+          articleId={article.id}
+          articleTitle={article.title}
+          open={discussionOpen}
+          scope={discussionScope}
+          onClose={closeDiscussion}
+          onSwitchToWhole={switchDiscussionToWholeArticle}
+          onBeforeVoiceStart={stopSpeaking}
+        />
+      ) : null}
     </main>
   );
 }
@@ -1298,7 +1477,7 @@ function integrationSyncMessage(
   const name = provider === "instapaper" ? "Instapaper" : "@Voice";
   const remaining = result.remaining > 0 ? ` · ${result.remaining} remaining` : "";
 
-  return `${name}: ${result.imported} imported · ${result.skipped} skipped · ${result.failed} failed${remaining}${detailSuffix}`;
+  return `${name}: ${result.imported} imported · ${result.deduplicated} deduplicated · ${result.reconciled} reconciled · ${result.skipped} skipped · ${result.failed} failed${remaining}${detailSuffix}`;
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {

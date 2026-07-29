@@ -9,6 +9,7 @@ import {
   type InstapaperBookmarkListInput,
 } from "@/server/integrations/instapaperClient";
 import { syncInstapaperArticles } from "@/server/integrations/providerSync";
+import { ProviderSyncAlreadyRunningError } from "@/server/integrations/providerSyncLock";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -77,6 +78,13 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result);
   } catch (error) {
+    if (error instanceof ProviderSyncAlreadyRunningError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: 409 },
+      );
+    }
+
     if (error instanceof InstapaperApiError) {
       const status =
         error.status === 429 || error.apiCode === 1040

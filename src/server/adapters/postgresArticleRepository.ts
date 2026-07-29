@@ -1,9 +1,9 @@
 import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
 import type { Article, ArticleBlock, ReadingProgress, SourceType } from "@/lib/types";
+import { articleContentFingerprint } from "@/server/articles/articleDeduplication";
 import {
   type ArticleProgressPatch,
   type ArticleRepository,
-  toArticleSummary,
 } from "@/server/ports/articleRepository";
 
 type PostgresArticleRow = {
@@ -26,13 +26,33 @@ type PostgresArticleRow = {
   blocks: ArticleBlock[] | string;
 };
 
+type PostgresArticleSummaryRow = Omit<
+  PostgresArticleRow,
+  "owner_email" | "content_html" | "text_content" | "blocks"
+>;
+
+type PostgresArticleDeduplicationRow = Pick<
+  PostgresArticleRow,
+  "id" | "title" | "source_url" | "text_content"
+>;
+
+type QueryClient = {
+  query(statement: string, params?: unknown[]): Promise<unknown[]>;
+};
+
 let sqlClient: NeonQueryFunction<false, false> | null = null;
 
 export class PostgresArticleRepository implements ArticleRepository {
+  private readonly queryClient?: QueryClient;
+
+  constructor(queryClient?: QueryClient) {
+    this.queryClient = queryClient;
+  }
+
   async list(ownerEmail: string) {
-    const rows = await queryArticles(
+    const rows = await this.queryRows<PostgresArticleSummaryRow>(
       `
-        SELECT ${articleColumns}
+        SELECT ${articleSummaryColumns}
         FROM articles
         WHERE owner_email = $1
         ORDER BY created_at DESC
@@ -40,11 +60,34 @@ export class PostgresArticleRepository implements ArticleRepository {
       [normalizeOwnerEmail(ownerEmail)],
     );
 
-    return rows.map(rowToArticle).map(toArticleSummary);
+    return rows.map(rowToArticleSummary);
+  }
+
+  async listDeduplicationCandidates(ownerEmail: string) {
+    const rows = await this.queryRows<PostgresArticleDeduplicationRow>(
+      `
+        SELECT
+          id,
+          title,
+          source_url,
+          text_content
+        FROM articles
+        WHERE owner_email = $1
+        ORDER BY id
+      `,
+      [normalizeOwnerEmail(ownerEmail)],
+    );
+
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      sourceUrl: row.source_url ?? undefined,
+      textContent: row.text_content,
+    }));
   }
 
   async findById(id: string, ownerEmail: string) {
-    const rows = await queryArticles(
+    const rows = await this.queryArticles(
       `
         SELECT ${articleColumns}
         FROM articles
@@ -58,7 +101,9 @@ export class PostgresArticleRepository implements ArticleRepository {
   }
 
   async create(article: Article, ownerEmail: string) {
-    const saved = await queryArticles(
+    const normalizedOwner = normalizeOwnerEmail(ownerEmail);
+    const contentFingerprint = articleContentFingerprint(article);
+    const saved = await this.queryArticles(
       `
         INSERT INTO articles (
           id,
@@ -77,13 +122,19 @@ export class PostgresArticleRepository implements ArticleRepository {
           progress_updated_at,
           content_html,
           text_content,
-          blocks
+          blocks,
+          content_fingerprint
         )
-        VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8, $9, $10, $11, $12, $13, $14::timestamptz, $15, $16, $17::jsonb)
-        ON CONFLICT (id) DO NOTHING
+        VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8, $9, $10, $11, $12, $13, $14::timestamptz, $15, $16, $17::jsonb, $18)
+        ON CONFLICT DO NOTHING
         RETURNING ${articleColumns}
       `,
-      [article.id, normalizeOwnerEmail(ownerEmail), ...articleParams(article).slice(1)],
+      [
+        article.id,
+        normalizedOwner,
+        ...articleParams(article).slice(1),
+        contentFingerprint ?? null,
+      ],
     );
 
     if (saved[0]) {
@@ -94,6 +145,22 @@ export class PostgresArticleRepository implements ArticleRepository {
 
     if (existing) {
       return existing;
+    }
+
+    if (contentFingerprint) {
+      const duplicates = await this.queryArticles(
+        `
+          SELECT ${articleColumns}
+          FROM articles
+          WHERE owner_email = $1 AND content_fingerprint = $2
+          LIMIT 1
+        `,
+        [normalizedOwner, contentFingerprint],
+      );
+
+      if (duplicates[0]) {
+        return rowToArticle(duplicates[0]);
+      }
     }
 
     throw new Error("An article with this identifier already belongs to another owner.");
@@ -117,7 +184,7 @@ export class PostgresArticleRepository implements ArticleRepository {
       updatedAt: now,
     };
 
-    const rows = await queryArticles(
+    const rows = await this.queryArticles(
       `
         UPDATE articles
         SET
@@ -141,6 +208,31 @@ export class PostgresArticleRepository implements ArticleRepository {
     return rows[0] ? rowToArticle(rows[0]) : null;
   }
 
+  async advanceProgress(id: string, ownerEmail: string, percent: number) {
+    const nextPercent = clampNumber(percent, 0, 1);
+    const now = new Date().toISOString();
+    const rows = await this.queryArticles(
+      `
+        UPDATE articles
+        SET
+          updated_at = $2::timestamptz,
+          progress_sentence_index = ROUND(
+            $3::double precision * GREATEST(sentence_count - 1, 0)
+          )::integer,
+          progress_percent = $3,
+          progress_updated_at = $2::timestamptz
+        WHERE
+          id = $1
+          AND owner_email = $4
+          AND progress_percent < $3
+        RETURNING ${articleColumns}
+      `,
+      [id, now, nextPercent, normalizeOwnerEmail(ownerEmail)],
+    );
+
+    return rows[0] ? rowToArticle(rows[0]) : this.findById(id, ownerEmail);
+  }
+
   async addProcessingCost(id: string, ownerEmail: string, costUsd: number) {
     const safeCost = clampNumber(costUsd, 0, Number.MAX_SAFE_INTEGER);
 
@@ -148,7 +240,7 @@ export class PostgresArticleRepository implements ArticleRepository {
       return this.findById(id, ownerEmail);
     }
 
-    const rows = await queryArticles(
+    const rows = await this.queryArticles(
       `
         UPDATE articles
         SET
@@ -164,14 +256,62 @@ export class PostgresArticleRepository implements ArticleRepository {
   }
 
   async deleteById(id: string, ownerEmail: string) {
-    const rows = (await getSql().query(
+    const rows = await this.queryRows<{ id: string }>(
       "DELETE FROM articles WHERE id = $1 AND owner_email = $2 RETURNING id",
       [id, normalizeOwnerEmail(ownerEmail)],
-    )) as { id: string }[];
+    );
 
     return rows.length > 0;
   }
+
+  async deleteByIdIfUnreferenced(id: string, ownerEmail: string) {
+    const rows = await this.queryRows<{ id: string }>(
+      `
+        DELETE FROM articles AS target
+        WHERE
+          target.id = $1
+          AND target.owner_email = $2
+          AND NOT EXISTS (
+            SELECT 1
+            FROM external_imports
+            WHERE
+              owner_email = $2
+              AND article_id = target.id
+              AND status <> 'dismissed'
+          )
+        RETURNING target.id
+      `,
+      [id, normalizeOwnerEmail(ownerEmail)],
+    );
+
+    return rows.length > 0;
+  }
+
+  private queryArticles(query: string, params: unknown[] = []) {
+    return this.queryRows<PostgresArticleRow>(query, params);
+  }
+
+  private async queryRows<T>(query: string, params: unknown[] = []) {
+    const client = this.queryClient ?? getSql();
+    return (await client.query(query, params)) as T[];
+  }
 }
+
+const articleSummaryColumns = `
+  id,
+  title,
+  source_type,
+  source_url,
+  created_at,
+  updated_at,
+  word_count,
+  estimated_minutes,
+  sentence_count,
+  processing_cost_usd,
+  progress_sentence_index,
+  progress_percent,
+  progress_updated_at
+`;
 
 const articleColumns = `
   id,
@@ -206,10 +346,6 @@ function getSql() {
 
   sqlClient = neon(databaseUrl);
   return sqlClient;
-}
-
-async function queryArticles(query: string, params: unknown[] = []) {
-  return (await getSql().query(query, params)) as PostgresArticleRow[];
 }
 
 function articleParams(article: Article) {
@@ -257,6 +393,26 @@ function rowToArticle(row: PostgresArticleRow): Article {
     contentHtml: row.content_html,
     textContent: row.text_content,
     blocks: parseBlocks(row.blocks),
+  };
+}
+
+function rowToArticleSummary(row: PostgresArticleSummaryRow) {
+  return {
+    id: row.id,
+    title: row.title,
+    sourceType: row.source_type,
+    sourceUrl: row.source_url ?? undefined,
+    createdAt: isoString(row.created_at),
+    updatedAt: isoString(row.updated_at),
+    wordCount: numberValue(row.word_count),
+    estimatedMinutes: numberValue(row.estimated_minutes),
+    sentenceCount: numberValue(row.sentence_count),
+    processingCostUsd: numberValue(row.processing_cost_usd ?? 0),
+    progress: {
+      sentenceIndex: numberValue(row.progress_sentence_index),
+      percent: numberValue(row.progress_percent),
+      updatedAt: isoString(row.progress_updated_at),
+    },
   };
 }
 

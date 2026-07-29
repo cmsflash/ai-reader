@@ -8,6 +8,7 @@ import {
   getDropboxConfiguredStatus,
 } from "@/server/integrations/dropboxClient";
 import { syncDropboxAtVoiceArticles } from "@/server/integrations/providerSync";
+import { ProviderSyncAlreadyRunningError } from "@/server/integrations/providerSyncLock";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -57,6 +58,13 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result);
   } catch (error) {
+    if (error instanceof ProviderSyncAlreadyRunningError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: 409 },
+      );
+    }
+
     if (error instanceof DropboxClientError) {
       return NextResponse.json(
         { error: error.message },

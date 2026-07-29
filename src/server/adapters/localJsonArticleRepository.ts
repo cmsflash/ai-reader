@@ -6,6 +6,7 @@ import {
   type ArticleRepository,
   toArticleSummary,
 } from "../ports/articleRepository.ts";
+import { articleContentFingerprint } from "../articles/articleDeduplication.ts";
 
 type LocalJsonArticleRepositoryOptions = {
   storePath?: string;
@@ -29,10 +30,22 @@ export class LocalJsonArticleRepository implements ArticleRepository {
   }
 
   async list(ownerEmail: string) {
+    return (await this.listArticles(ownerEmail)).map(toArticleSummary);
+  }
+
+  async listArticles(ownerEmail: string) {
     const store = await this.readCurrentStore();
     return store.articles
-      .filter((article) => articleBelongsToOwner(article, ownerEmail))
-      .map(toArticleSummary);
+      .filter((article) => articleBelongsToOwner(article, ownerEmail));
+  }
+
+  async listDeduplicationCandidates(ownerEmail: string) {
+    return (await this.listArticles(ownerEmail)).map((article) => ({
+      id: article.id,
+      title: article.title,
+      sourceUrl: article.sourceUrl,
+      textContent: article.textContent,
+    }));
   }
 
   async findById(id: string, ownerEmail: string) {
@@ -54,6 +67,19 @@ export class LocalJsonArticleRepository implements ArticleRepository {
 
       if (existing) {
         return { value: existing };
+      }
+
+      const contentFingerprint = articleContentFingerprint(article);
+      const duplicate = contentFingerprint
+        ? store.articles.find(
+            (candidate) =>
+              articleBelongsToOwner(candidate, ownerEmail) &&
+              articleContentFingerprint(candidate) === contentFingerprint,
+          )
+        : undefined;
+
+      if (duplicate) {
+        return { value: duplicate };
       }
 
       const storedArticle: StoredArticle = {
@@ -97,6 +123,49 @@ export class LocalJsonArticleRepository implements ArticleRepository {
         ...article,
         updatedAt: now,
         progress: nextProgress,
+      };
+      const nextArticles = [...store.articles];
+      nextArticles[articleIndex] = updatedArticle;
+
+      return {
+        store: {
+          ...store,
+          articles: nextArticles,
+        },
+        value: updatedArticle,
+      };
+    });
+  }
+
+  async advanceProgress(id: string, ownerEmail: string, percent: number) {
+    return this.mutateStore((store) => {
+      const articleIndex = store.articles.findIndex(
+        (article) =>
+          article.id === id && articleBelongsToOwner(article, ownerEmail),
+      );
+
+      if (articleIndex === -1) {
+        return { value: null };
+      }
+
+      const article = store.articles[articleIndex];
+      const nextPercent = clampNumber(percent, 0, 1);
+
+      if (nextPercent <= article.progress.percent) {
+        return { value: article };
+      }
+
+      const now = new Date().toISOString();
+      const updatedArticle: Article = {
+        ...article,
+        updatedAt: now,
+        progress: {
+          sentenceIndex: Math.round(
+            nextPercent * Math.max(article.sentenceCount - 1, 0),
+          ),
+          percent: nextPercent,
+          updatedAt: now,
+        },
       };
       const nextArticles = [...store.articles];
       nextArticles[articleIndex] = updatedArticle;
@@ -169,6 +238,10 @@ export class LocalJsonArticleRepository implements ArticleRepository {
         value: true,
       };
     });
+  }
+
+  async deleteByIdIfUnreferenced(id: string, ownerEmail: string) {
+    return this.deleteById(id, ownerEmail);
   }
 
   private async readCurrentStore() {

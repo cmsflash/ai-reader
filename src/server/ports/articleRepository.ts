@@ -1,9 +1,13 @@
 import type { Article, ArticleSummary, ReadingProgress } from "@/lib/types";
+import type { ArticleDeduplicationCandidate } from "@/server/articles/articleDeduplication";
 
 export type ArticleProgressPatch = Partial<Pick<ReadingProgress, "percent" | "sentenceIndex">>;
 
 export interface ArticleRepository {
   list(ownerEmail: string): Promise<ArticleSummary[]>;
+  listDeduplicationCandidates(
+    ownerEmail: string,
+  ): Promise<ArticleDeduplicationCandidate[]>;
   findById(id: string, ownerEmail: string): Promise<Article | null>;
   create(article: Article, ownerEmail: string): Promise<Article>;
   updateProgress(
@@ -11,8 +15,17 @@ export interface ArticleRepository {
     ownerEmail: string,
     progress: ArticleProgressPatch,
   ): Promise<Article | null>;
+  advanceProgress(
+    id: string,
+    ownerEmail: string,
+    percent: number,
+  ): Promise<Article | null>;
   addProcessingCost(id: string, ownerEmail: string, costUsd: number): Promise<Article | null>;
   deleteById(id: string, ownerEmail: string): Promise<boolean>;
+  deleteByIdIfUnreferenced(
+    id: string,
+    ownerEmail: string,
+  ): Promise<boolean>;
 }
 
 export function toArticleSummary(article: Article): ArticleSummary {

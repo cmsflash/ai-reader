@@ -1,10 +1,16 @@
 import {
-  deleteSavedArticle,
+  deleteSavedArticleIfUnreferenced,
   getSavedArticle,
   importFileArticle,
   importHtmlArticle,
   importUrlArticle,
 } from "@/server/articles/articleService";
+import {
+  ArticleDeduplicationIndex,
+  type ArticleDeduplicationReason,
+} from "@/server/articles/articleDeduplication";
+import type { Article } from "@/lib/types";
+import { getArticleRepository } from "@/server/runtime/articleRepository";
 import {
   createDropboxReadClient,
   type DropboxFileMetadata,
@@ -13,6 +19,7 @@ import {
   articleIdForImport,
   claimImport,
   clearImportCleanupArticle,
+  hasActiveImportReference,
   isImportRecordClaimable,
   listImportRecords,
   markImportCompletedReconciled,
@@ -26,6 +33,7 @@ import {
   type InstapaperBookmarkListInput,
   type InstapaperClient,
 } from "@/server/integrations/instapaperClient";
+import { withProviderSyncLock } from "@/server/integrations/providerSyncLock";
 
 const INSTAPAPER_PROVIDER = "instapaper";
 const DROPBOX_PROVIDER = "dropbox-atvoice";
@@ -34,6 +42,8 @@ const MAX_BATCH_SIZE = 10;
 
 export type ProviderSyncResult = {
   imported: number;
+  deduplicated: number;
+  reconciled: number;
   failed: number;
   skipped: number;
   remaining: number;
@@ -41,6 +51,18 @@ export type ProviderSyncResult = {
   importedArticles: Array<{
     id: string;
     title: string;
+  }>;
+  deduplicatedArticles: Array<{
+    id: string;
+    title: string;
+    externalId: string;
+    reason: ArticleDeduplicationReason;
+    similarity: number;
+  }>;
+  reconciledArticles: Array<{
+    id: string;
+    title: string;
+    externalId: string;
   }>;
   failures: Array<{
     externalId: string;
@@ -50,11 +72,37 @@ export type ProviderSyncResult = {
   message: string;
 };
 
-export async function syncInstapaperArticles(input: {
+type ProviderImportOutcome = {
+  article: Article;
+  created: boolean;
+  deduplicated: boolean;
+  deduplicationReason?: ArticleDeduplicationReason;
+  deduplicationSimilarity?: number;
+  importSourceUrl?: string;
+};
+
+type InstapaperSyncInput = {
   ownerEmail: string;
   folder: InstapaperBookmarkListInput["folderId"];
   batchSize?: number;
-}): Promise<ProviderSyncResult> {
+};
+
+type DropboxSyncInput = {
+  ownerEmail: string;
+  batchSize?: number;
+};
+
+export function syncInstapaperArticles(
+  input: InstapaperSyncInput,
+): Promise<ProviderSyncResult> {
+  return withProviderSyncLock(input.ownerEmail, () =>
+    syncInstapaperArticlesUnlocked(input),
+  );
+}
+
+async function syncInstapaperArticlesUnlocked(
+  input: InstapaperSyncInput,
+): Promise<ProviderSyncResult> {
   const batchSize = normalizeBatchSize(input.batchSize);
   const client = createInstapaperClient();
   const listing = await client.listBookmarks({
@@ -63,6 +111,9 @@ export async function syncInstapaperArticles(input: {
   });
   const records = await listImportRecords(input.ownerEmail, INSTAPAPER_PROVIDER);
   await retryPendingCleanup(input.ownerEmail, records);
+  const deduplication = new ArticleDeduplicationIndex(
+    await getArticleRepository().listDeduplicationCandidates(input.ownerEmail),
+  );
   const recordByExternalId = importRecordMap(records);
   const candidates = listing.bookmarks
     .map((bookmark, index) => ({
@@ -76,6 +127,8 @@ export async function syncInstapaperArticles(input: {
     )
     .sort(compareImportCandidates);
   const importedArticles: ProviderSyncResult["importedArticles"] = [];
+  const deduplicatedArticles: ProviderSyncResult["deduplicatedArticles"] = [];
+  const reconciledArticles: ProviderSyncResult["reconciledArticles"] = [];
   const failures: ProviderSyncResult["failures"] = [];
   let claimed = 0;
   let claimConflicts = 0;
@@ -116,12 +169,21 @@ export async function syncInstapaperArticles(input: {
       sourceHash,
     );
 
+    let finalized:
+      | {
+          imported: ProviderImportOutcome;
+          completed: ExternalImportRecord;
+        }
+      | undefined;
+
     try {
       const imported = await importInstapaperBookmark(
         client,
         bookmark,
         input.ownerEmail,
         articleId,
+        deduplication,
+        candidate.record?.articleId,
       );
 
       const completed = await markImportCompletedReconciled(
@@ -130,20 +192,14 @@ export async function syncInstapaperArticles(input: {
         externalId,
         imported.article.id,
         claim.attemptId,
+        completionDetails(imported),
       );
 
       if (!completed) {
         throw new Error("The Instapaper import lease expired before completion.");
       }
 
-      await cleanupReplacedArticle(
-        input.ownerEmail,
-        completed,
-      );
-      importedArticles.push({
-        id: imported.article.id,
-        title: imported.article.title,
-      });
+      finalized = { imported, completed };
     } catch (error) {
       await markImportFailed(
         input.ownerEmail,
@@ -157,23 +213,50 @@ export async function syncInstapaperArticles(input: {
         title: bookmark.title || bookmark.url,
         error: messageFromError(error),
       });
+      continue;
     }
+
+    await cleanupReplacedArticle(
+      input.ownerEmail,
+      finalized.completed,
+    ).catch(() => undefined);
+    collectImportOutcome({
+      imported: finalized.imported,
+      externalId,
+      importedArticles,
+      deduplicatedArticles,
+      reconciledArticles,
+    });
   }
 
   return syncResult({
     importedArticles,
+    deduplicatedArticles,
+    reconciledArticles,
     failures,
     skipped: listing.bookmarks.length - candidates.length + claimConflicts,
-    remaining: Math.max(candidates.length - claimed - claimConflicts, 0),
+    remaining: remainingCandidateCount(
+      candidates.length,
+      importedArticles.length,
+      deduplicatedArticles.length,
+      reconciledArticles.length,
+    ),
     providerLabel: "Instapaper",
     possiblyTruncated: listing.bookmarks.length >= 500,
   });
 }
 
-export async function syncDropboxAtVoiceArticles(input: {
-  ownerEmail: string;
-  batchSize?: number;
-}): Promise<ProviderSyncResult> {
+export function syncDropboxAtVoiceArticles(
+  input: DropboxSyncInput,
+): Promise<ProviderSyncResult> {
+  return withProviderSyncLock(input.ownerEmail, () =>
+    syncDropboxAtVoiceArticlesUnlocked(input),
+  );
+}
+
+async function syncDropboxAtVoiceArticlesUnlocked(
+  input: DropboxSyncInput,
+): Promise<ProviderSyncResult> {
   const batchSize = normalizeBatchSize(input.batchSize);
   const client = createDropboxReadClient();
   const allFiles = (await client.listAtVoiceFiles())
@@ -181,6 +264,9 @@ export async function syncDropboxAtVoiceArticles(input: {
     .sort(compareDropboxFilesNewestFirst);
   const records = await listImportRecords(input.ownerEmail, DROPBOX_PROVIDER);
   await retryPendingCleanup(input.ownerEmail, records);
+  const deduplication = new ArticleDeduplicationIndex(
+    await getArticleRepository().listDeduplicationCandidates(input.ownerEmail),
+  );
   const recordByExternalId = importRecordMap(records);
   const candidates = allFiles
     .map((file, index) => ({
@@ -194,6 +280,8 @@ export async function syncDropboxAtVoiceArticles(input: {
     )
     .sort(compareImportCandidates);
   const importedArticles: ProviderSyncResult["importedArticles"] = [];
+  const deduplicatedArticles: ProviderSyncResult["deduplicatedArticles"] = [];
+  const reconciledArticles: ProviderSyncResult["reconciledArticles"] = [];
   const failures: ProviderSyncResult["failures"] = [];
   let claimed = 0;
   let claimConflicts = 0;
@@ -236,15 +324,24 @@ export async function syncDropboxAtVoiceArticles(input: {
       sourceHash,
     );
 
+    let finalized:
+      | {
+          imported: ProviderImportOutcome;
+          completed: ExternalImportRecord;
+        }
+      | undefined;
+
     try {
       const existing = await getSavedArticle(articleId, input.ownerEmail);
       const imported = existing
-        ? { article: existing }
+        ? recoveredImportOutcome(existing)
         : await importDropboxFile(
             client,
             metadata,
             input.ownerEmail,
             articleId,
+            deduplication,
+            candidate.record?.articleId,
           );
 
       const completed = await markImportCompletedReconciled(
@@ -253,20 +350,14 @@ export async function syncDropboxAtVoiceArticles(input: {
         externalId,
         imported.article.id,
         claim.attemptId,
+        completionDetails(imported),
       );
 
       if (!completed) {
         throw new Error("The Dropbox import lease expired before completion.");
       }
 
-      await cleanupReplacedArticle(
-        input.ownerEmail,
-        completed,
-      );
-      importedArticles.push({
-        id: imported.article.id,
-        title: imported.article.title,
-      });
+      finalized = { imported, completed };
     } catch (error) {
       await markImportFailed(
         input.ownerEmail,
@@ -280,14 +371,34 @@ export async function syncDropboxAtVoiceArticles(input: {
         title: metadata.name,
         error: messageFromError(error),
       });
+      continue;
     }
+
+    await cleanupReplacedArticle(
+      input.ownerEmail,
+      finalized.completed,
+    ).catch(() => undefined);
+    collectImportOutcome({
+      imported: finalized.imported,
+      externalId,
+      importedArticles,
+      deduplicatedArticles,
+      reconciledArticles,
+    });
   }
 
   return syncResult({
     importedArticles,
+    deduplicatedArticles,
+    reconciledArticles,
     failures,
     skipped: allFiles.length - candidates.length + claimConflicts,
-    remaining: Math.max(candidates.length - claimed - claimConflicts, 0),
+    remaining: remainingCandidateCount(
+      candidates.length,
+      importedArticles.length,
+      deduplicatedArticles.length,
+      reconciledArticles.length,
+    ),
     providerLabel: "@Voice Dropbox",
   });
 }
@@ -333,11 +444,13 @@ async function importInstapaperBookmark(
   bookmark: InstapaperBookmark,
   ownerEmail: string,
   articleId: string,
-) {
+  deduplication: ArticleDeduplicationIndex,
+  previousArticleId?: string,
+): Promise<ProviderImportOutcome> {
   const existing = await getSavedArticle(articleId, ownerEmail);
 
   if (existing) {
-    return { article: existing };
+    return recoveredImportOutcome(existing);
   }
 
   try {
@@ -347,6 +460,8 @@ async function importInstapaperBookmark(
       title: bookmark.title || undefined,
       sourceUrl: bookmark.url,
       progress: bookmark.progress,
+      deduplication,
+      excludeArticleId: previousArticleId,
     });
   } catch (error) {
     if (!shouldFallbackToBookmarkUrl(error, bookmark.url)) {
@@ -357,6 +472,8 @@ async function importInstapaperBookmark(
       id: articleId,
       title: bookmark.title || undefined,
       progress: bookmark.progress,
+      deduplication,
+      excludeArticleId: previousArticleId,
     });
   }
 }
@@ -366,7 +483,9 @@ async function importDropboxFile(
   metadata: DropboxFileMetadata,
   ownerEmail: string,
   articleId: string,
-) {
+  deduplication: ArticleDeduplicationIndex,
+  previousArticleId?: string,
+): Promise<ProviderImportOutcome> {
   const bytes = await client.downloadFile(metadata.id);
   const contents = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(contents).set(bytes);
@@ -375,7 +494,11 @@ async function importDropboxFile(
     lastModified: modifiedTimeForFile(metadata),
   });
 
-  return importFileArticle(file, ownerEmail, { id: articleId });
+  return importFileArticle(file, ownerEmail, {
+    id: articleId,
+    deduplication,
+    excludeArticleId: previousArticleId,
+  });
 }
 
 function shouldFallbackToBookmarkUrl(error: unknown, rawUrl: string) {
@@ -398,26 +521,44 @@ function shouldFallbackToBookmarkUrl(error: unknown, rawUrl: string) {
   );
 }
 
-async function retryPendingCleanup(
+type CleanupOperations = {
+  hasActiveImportReference: typeof hasActiveImportReference;
+  deleteArticle: typeof deleteArticleBestEffort;
+  clearImportCleanupArticle: typeof clearImportCleanupArticle;
+};
+
+const cleanupOperations: CleanupOperations = {
+  hasActiveImportReference,
+  deleteArticle: deleteArticleBestEffort,
+  clearImportCleanupArticle,
+};
+
+export async function retryPendingCleanup(
   ownerEmail: string,
   records: ExternalImportRecord[],
+  operations: CleanupOperations = cleanupOperations,
 ) {
   for (const record of records) {
     if (!record.cleanupArticleId) {
       continue;
     }
 
-    const cleaned = await deleteArticleBestEffort(
-      record.cleanupArticleId,
-      ownerEmail,
-    );
-
-    if (!cleaned) {
-      continue;
-    }
-
     try {
-      await clearImportCleanupArticle(
+      const cleaned =
+        (await operations.hasActiveImportReference(
+          ownerEmail,
+          record.cleanupArticleId,
+        )) ||
+        (await operations.deleteArticle(
+          record.cleanupArticleId,
+          ownerEmail,
+        ));
+
+      if (!cleaned) {
+        continue;
+      }
+
+      await operations.clearImportCleanupArticle(
         ownerEmail,
         record.provider,
         record.externalId,
@@ -425,40 +566,49 @@ async function retryPendingCleanup(
       );
       record.cleanupArticleId = undefined;
     } catch {
-      // Keep the in-memory cleanup marker so this sync does not replace it.
+      // Preserve this record's marker and continue retrying the remaining records.
     }
   }
 }
 
-async function cleanupReplacedArticle(
+export async function cleanupReplacedArticle(
   ownerEmail: string,
   record: ExternalImportRecord,
+  operations: CleanupOperations = cleanupOperations,
 ) {
   if (!record.cleanupArticleId) {
     return;
   }
 
-  const cleaned = await deleteArticleBestEffort(
-    record.cleanupArticleId,
-    ownerEmail,
-  );
+  try {
+    const cleaned =
+      (await operations.hasActiveImportReference(
+        ownerEmail,
+        record.cleanupArticleId,
+      )) ||
+      (await operations.deleteArticle(
+        record.cleanupArticleId,
+        ownerEmail,
+      ));
 
-  if (!cleaned) {
-    return;
+    if (!cleaned) {
+      return;
+    }
+
+    await operations.clearImportCleanupArticle(
+      ownerEmail,
+      record.provider,
+      record.externalId,
+      record.cleanupArticleId,
+    );
+  } catch {
+    // Ledger completion is durable; leave the marker for a later cleanup retry.
   }
-
-  await clearImportCleanupArticle(
-    ownerEmail,
-    record.provider,
-    record.externalId,
-    record.cleanupArticleId,
-  ).catch(() => null);
 }
 
 async function deleteArticleBestEffort(articleId: string, ownerEmail: string) {
   try {
-    await deleteSavedArticle(articleId, ownerEmail);
-    return true;
+    return await deleteSavedArticleIfUnreferenced(articleId, ownerEmail);
   } catch {
     // A completed replacement remains valid even if old-artifact cleanup must be retried later.
     return false;
@@ -543,6 +693,8 @@ function modifiedTimeForFile(metadata: DropboxFileMetadata) {
 
 function syncResult(input: {
   importedArticles: ProviderSyncResult["importedArticles"];
+  deduplicatedArticles: ProviderSyncResult["deduplicatedArticles"];
+  reconciledArticles: ProviderSyncResult["reconciledArticles"];
   failures: ProviderSyncResult["failures"];
   skipped: number;
   remaining: number;
@@ -550,25 +702,102 @@ function syncResult(input: {
   possiblyTruncated?: boolean;
 }): ProviderSyncResult {
   const imported = input.importedArticles.length;
+  const deduplicated = input.deduplicatedArticles.length;
+  const reconciled = input.reconciledArticles.length;
   const failed = input.failures.length;
   const summary =
-    imported === 0 && failed === 0
+    imported === 0 && deduplicated === 0 && reconciled === 0 && failed === 0
       ? `${input.providerLabel} is already up to date.`
-      : `${input.providerLabel}: imported ${imported}, failed ${failed}, ${input.remaining} remaining.`;
+      : `${input.providerLabel}: imported ${imported}, deduplicated ${deduplicated}, reconciled ${reconciled}, failed ${failed}, ${input.remaining} remaining.`;
   const message = input.possiblyTruncated
     ? `${summary} Instapaper returned its 500-item limit, so older bookmarks may not be visible yet.`
     : summary;
 
   return {
     imported,
+    deduplicated,
+    reconciled,
     failed,
     skipped: input.skipped,
     remaining: input.remaining,
     importedArticles: input.importedArticles,
+    deduplicatedArticles: input.deduplicatedArticles,
+    reconciledArticles: input.reconciledArticles,
     failures: input.failures,
     possiblyTruncated: input.possiblyTruncated,
     message,
   };
+}
+
+export function recoveredImportOutcome(article: Article): ProviderImportOutcome {
+  return {
+    article,
+    created: false,
+    deduplicated: false,
+    importSourceUrl: article.sourceUrl,
+  };
+}
+
+function completionDetails(imported: ProviderImportOutcome) {
+  return {
+    sourceUrl: imported.importSourceUrl,
+    metadata: {
+      deduplication: imported.deduplicated
+        ? {
+            articleId: imported.article.id,
+            reason: imported.deduplicationReason,
+            similarity: Number(
+              (imported.deduplicationSimilarity ?? 1).toFixed(6),
+            ),
+          }
+        : null,
+    },
+  };
+}
+
+function collectImportOutcome(input: {
+  imported: ProviderImportOutcome;
+  externalId: string;
+  importedArticles: ProviderSyncResult["importedArticles"];
+  deduplicatedArticles: ProviderSyncResult["deduplicatedArticles"];
+  reconciledArticles: ProviderSyncResult["reconciledArticles"];
+}) {
+  if (input.imported.deduplicated) {
+    input.deduplicatedArticles.push({
+      id: input.imported.article.id,
+      title: input.imported.article.title,
+      externalId: input.externalId,
+      reason: input.imported.deduplicationReason ?? "exact-content",
+      similarity: input.imported.deduplicationSimilarity ?? 1,
+    });
+    return;
+  }
+
+  if (input.imported.created) {
+    input.importedArticles.push({
+      id: input.imported.article.id,
+      title: input.imported.article.title,
+    });
+    return;
+  }
+
+  input.reconciledArticles.push({
+    id: input.imported.article.id,
+    title: input.imported.article.title,
+    externalId: input.externalId,
+  });
+}
+
+export function remainingCandidateCount(
+  candidateCount: number,
+  importedCount: number,
+  deduplicatedCount: number,
+  reconciledCount: number,
+) {
+  return Math.max(
+    candidateCount - importedCount - deduplicatedCount - reconciledCount,
+    0,
+  );
 }
 
 function messageFromError(error: unknown) {

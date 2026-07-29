@@ -39,6 +39,7 @@ INSTAPAPER_ACCESS_TOKEN_SECRET=...
 DROPBOX_APP_KEY=...
 DROPBOX_APP_SECRET=...
 DROPBOX_REFRESH_TOKEN=...
+OPENAI_API_KEY=...
 ELEVENLABS_API_KEY=...
 ELEVENLABS_VOICE_ID=JBFqnCBsd6RMkjVDRZzb
 ELEVENLABS_MODEL_ID=eleven_multilingual_v2
@@ -152,6 +153,24 @@ reference](https://www.dropbox.com/developers/documentation/http/documentation).
 The sync reads supported @Voice exports recursively from `/Apps/@Voice`, including
 `.mhtml.zip`, MHTML, HTML, URL shortcuts, PDF, DOCX, Markdown, and text files. It never writes to or
 deletes from Dropbox.
+
+## AI discussion
+
+Set `OPENAI_API_KEY` as a server-only production variable. Never prefix it with `NEXT_PUBLIC_`.
+AI Reader uses `gpt-5.6-sol` with medium reasoning for typed, article-grounded discussion and
+`gpt-realtime-2` for native speech-to-speech WebRTC sessions. The browser sends its WebRTC offer
+to AI Reader; the server creates the OpenAI Realtime call, so the credential is never sent to the
+browser.
+
+For local development, AI Reader also recognizes the purpose-scoped shell variable
+`OPENAI_API_KEY_AI_READER`. Shell startup files are plaintext on that computer; a macOS
+Keychain-backed loader is safer when practical. Do not store the key in tracked files, synced
+folders, client-side JavaScript, URLs, or logs.
+
+References:
+
+- [OpenAI GPT-5.6 guidance](https://developers.openai.com/api/docs/guides/latest-model)
+- [OpenAI Realtime WebRTC guide](https://developers.openai.com/api/docs/guides/realtime-webrtc)
 
 ## Personal import clients
 

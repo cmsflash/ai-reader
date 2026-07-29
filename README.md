@@ -1,6 +1,7 @@
 # AI Reader
 
-Minimal web MVP for saving URLs and documents as server-stored readable articles, syncing reading progress, and supporting TTS playback.
+Personal reader for saving URLs and documents, syncing reading progress, listening with TTS, and
+discussing whole articles or selected passages with AI.
 
 ## Import options
 
@@ -11,8 +12,19 @@ Minimal web MVP for saving URLs and documents as server-stored readable articles
 - Share a URL to the installed Android PWA.
 - Share a URL from iPhone or iPad with an Apple Shortcut that opens `/share?url=...`.
 
-Provider imports are idempotent: another sync imports new or changed source items without duplicating
-completed items.
+Provider imports are idempotent and content-aware: another sync imports new or changed source items,
+deduplicates substantially identical material across providers and the existing library, and retains
+each provider's provenance.
+
+## AI discussion
+
+- Choose **Discuss** to chat about the entire open article.
+- Select article text to discuss only that passage.
+- Typed chat uses `gpt-5.6-sol` with medium reasoning.
+- Pure voice uses a server-initiated WebRTC session with `gpt-realtime-2`.
+
+The browser never receives the OpenAI API key. Selected-passage requests are checked against the
+authorized saved article on the server and do not include surrounding article text.
 
 ## Run
 
@@ -23,8 +35,8 @@ npm run dev
 
 Local article data, archived artifacts, and secrets are intentionally ignored.
 
-For provider credentials, Chrome extension packaging, Android installation, and the iOS Shortcut,
-see [Production Setup](docs/production.md).
+For OpenAI and provider credentials, Chrome extension packaging, Android installation, and the iOS
+Shortcut, see [Production Setup](docs/production.md).
 
 ## Chrome extension
 
