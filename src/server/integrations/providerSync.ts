@@ -39,6 +39,8 @@ const INSTAPAPER_PROVIDER = "instapaper";
 const DROPBOX_PROVIDER = "dropbox-atvoice";
 const DEFAULT_BATCH_SIZE = 3;
 const MAX_BATCH_SIZE = 10;
+const INSTAPAPER_SYNC_REQUEST_TIMEOUT_MS = 8_000;
+const INSTAPAPER_SYNC_MAX_ATTEMPTS = 2;
 
 export type ProviderSyncResult = {
   imported: number;
@@ -104,7 +106,14 @@ async function syncInstapaperArticlesUnlocked(
   input: InstapaperSyncInput,
 ): Promise<ProviderSyncResult> {
   const batchSize = normalizeBatchSize(input.batchSize);
-  const client = createInstapaperClient();
+  const client = createInstapaperClient({
+    requestTimeoutMs: INSTAPAPER_SYNC_REQUEST_TIMEOUT_MS,
+    retry: {
+      maxAttempts: INSTAPAPER_SYNC_MAX_ATTEMPTS,
+      baseDelayMs: 300,
+      maxDelayMs: 1_500,
+    },
+  });
   const listing = await client.listBookmarks({
     folderId: input.folder,
     limit: 500,
@@ -422,13 +431,31 @@ function importRecordMap(records: ExternalImportRecord[]) {
   return new Map(records.map((record) => [record.externalId, record]));
 }
 
-function compareImportCandidates(
+export function compareImportCandidates(
   left: { index: number; record?: ExternalImportRecord },
   right: { index: number; record?: ExternalImportRecord },
 ) {
   const priorityDifference =
     importCandidatePriority(left.record) - importCandidatePriority(right.record);
-  return priorityDifference || left.index - right.index;
+
+  if (priorityDifference) {
+    return priorityDifference;
+  }
+
+  if (
+    left.record?.status === "failed" &&
+    right.record?.status === "failed"
+  ) {
+    const oldestFailureFirst = left.record.updatedAt.localeCompare(
+      right.record.updatedAt,
+    );
+
+    if (oldestFailureFirst) {
+      return oldestFailureFirst;
+    }
+  }
+
+  return left.index - right.index;
 }
 
 function importCandidatePriority(record?: ExternalImportRecord) {

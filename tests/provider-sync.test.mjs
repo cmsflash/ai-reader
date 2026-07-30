@@ -41,6 +41,7 @@ registerHooks({
 
 const {
   cleanupReplacedArticle,
+  compareImportCandidates,
   recoveredImportOutcome,
   remainingCandidateCount,
   retryPendingCleanup,
@@ -70,6 +71,30 @@ test("only resolved candidates reduce the remaining count", () => {
     4,
   );
   assert.equal(remainingCandidateCount(1, 1, 1, 1), 0);
+});
+
+test("failed candidates rotate oldest-first after new work", () => {
+  const failed = (updatedAt) => ({
+    ownerEmail: "reader@example.com",
+    provider: "instapaper",
+    externalId: updatedAt,
+    status: "failed",
+    metadata: {},
+    createdAt: updatedAt,
+    updatedAt,
+  });
+  const candidates = [
+    { index: 0, record: failed("2026-07-30T12:00:00.000Z") },
+    { index: 1 },
+    { index: 2, record: failed("2026-07-30T11:00:00.000Z") },
+  ];
+
+  candidates.sort(compareImportCandidates);
+
+  assert.deepEqual(
+    candidates.map((candidate) => candidate.index),
+    [1, 2, 0],
+  );
 });
 
 test("cleanup retry isolates query and clear errors to each record", async () => {
