@@ -20,6 +20,13 @@ type ExtractedArticle = {
   blocks: ArticleBlock[];
 };
 
+export class ArticleExtractionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ArticleExtractionError";
+  }
+}
+
 type HtmlCandidate = {
   title: string;
   contentHtml: string;
@@ -126,7 +133,7 @@ export async function articleFromUrl(rawUrl: string): Promise<Article> {
     return buildArticle(await extractPdf(buffer, titleFromUrl(url), url.href));
   }
 
-  const raw = buffer.toString("utf8");
+  const raw = decodeTextBuffer(buffer, contentType);
 
   if (contentType.includes("text/plain")) {
     return buildArticle(extractPlainText(raw, titleFromUrl(url), "text", url.href));
@@ -139,12 +146,17 @@ export async function articleFromHtml(
   rawHtml: string,
   options: {
     title?: string;
+    fallbackTitle?: string;
     sourceUrl?: string;
   } = {},
 ): Promise<Article> {
   const sourceUrl = optionalPublicUrl(options.sourceUrl);
   const parsingUrl = sourceUrl ?? "https://import.ai-reader.invalid/article";
-  const extracted = await extractReadableHtml(rawHtml, parsingUrl);
+  const extracted = await extractReadableHtml(
+    rawHtml,
+    parsingUrl,
+    options.fallbackTitle,
+  );
 
   return buildArticle({
     ...extracted,
@@ -166,15 +178,15 @@ export async function articleFromFile(file: File): Promise<Article> {
   ) {
     const decoded = decodeVoiceDocument(buffer, fileName);
     return articleFromHtml(decoded.html, {
-      title: decoded.title ?? stripVoiceExtension(fileName),
+      fallbackTitle: decoded.title ?? stripExtension(fileName),
       sourceUrl: decoded.sourceUrl,
     });
   }
 
   if (extension === "html" || extension === "htm") {
-    const html = buffer.toString("utf8");
+    const html = decodeTextBuffer(buffer, file.type);
     return articleFromHtml(html, {
-      title: stripExtension(fileName),
+      fallbackTitle: stripExtension(fileName),
       sourceUrl: hyperionicsSourceUrl(html),
     });
   }
@@ -235,6 +247,59 @@ function buildArticle(extracted: ExtractedArticle): Article {
   };
 }
 
+export function repairArticleExtraction(article: Article): Article {
+  const source = optionalArticleUrl(article.sourceUrl);
+
+  if (!source || article.sourceType !== "url") {
+    return article;
+  }
+
+  const blocks = normalizeHtmlArticleBlocks(article.blocks, source);
+  const textContent = blocksToText(blocks);
+  const wordCount = countWords(textContent);
+  const sentenceCount = annotateBlocks(blocks).sentences.length;
+  const progressSentenceIndex = Math.round(
+    article.progress.percent * Math.max(sentenceCount - 1, 0),
+  );
+
+  if (
+    blocks.length === 0 ||
+    textContent.length < 80 ||
+    looksLikeBlockedPage(textContent) ||
+    looksLikeUnsupportedShell(textContent)
+  ) {
+    throw new ArticleExtractionError(
+      "The stored page does not contain repairable article content.",
+    );
+  }
+
+  if (
+    textContent === article.textContent &&
+    JSON.stringify(blocks) === JSON.stringify(article.blocks) &&
+    progressSentenceIndex === article.progress.sentenceIndex
+  ) {
+    return article;
+  }
+
+  const now = new Date().toISOString();
+
+  return {
+    ...article,
+    updatedAt: now,
+    wordCount,
+    estimatedMinutes: Math.max(1, Math.ceil(wordCount / 230)),
+    sentenceCount,
+    progress: {
+      ...article.progress,
+      sentenceIndex: progressSentenceIndex,
+      updatedAt: now,
+    },
+    contentHtml: blocksToHtml(blocks),
+    textContent,
+    blocks,
+  };
+}
+
 function optionalPublicUrl(rawUrl?: string) {
   if (!rawUrl) {
     return undefined;
@@ -248,6 +313,50 @@ function optionalPublicUrl(rawUrl?: string) {
   } catch {
     return undefined;
   }
+}
+
+function optionalArticleUrl(rawUrl?: string) {
+  const normalized = optionalPublicUrl(rawUrl);
+  return normalized ? new URL(normalized) : undefined;
+}
+
+function decodeTextBuffer(buffer: Buffer, contentType = "") {
+  const bomEncoding =
+    buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf
+      ? "utf-8"
+      : buffer[0] === 0xff && buffer[1] === 0xfe
+        ? "utf-16le"
+        : buffer[0] === 0xfe && buffer[1] === 0xff
+          ? "utf-16be"
+          : undefined;
+  const declaredEncoding =
+    /charset\s*=\s*["']?\s*([^;"'\s]+)/i.exec(contentType)?.[1] ||
+    htmlMetaEncoding(buffer);
+
+  for (const encoding of [bomEncoding, declaredEncoding, "utf-8"]) {
+    if (!encoding) {
+      continue;
+    }
+
+    try {
+      return new TextDecoder(encoding).decode(buffer);
+    } catch {
+      continue;
+    }
+  }
+
+  return buffer.toString("utf8");
+}
+
+function htmlMetaEncoding(buffer: Buffer) {
+  const prefix = buffer.subarray(0, 8_192).toString("latin1");
+
+  return (
+    /<meta\b[^>]*\bcharset\s*=\s*["']?\s*([^"'\s/>]+)/i.exec(prefix)?.[1] ||
+    /<meta\b[^>]*\bcontent\s*=\s*["'][^"']*\bcharset\s*=\s*([^;"'\s]+)/i.exec(
+      prefix,
+    )?.[1]
+  );
 }
 
 function hyperionicsSourceUrl(html: string) {
@@ -268,29 +377,30 @@ function urlFromInternetShortcut(raw: string) {
   return match[1].trim();
 }
 
-function stripVoiceExtension(fileName: string) {
-  return fileName.replace(/\.mhtml(?:\.zip)?$/i, "") || "Untitled";
-}
-
-async function extractReadableHtml(rawHtml: string, sourceUrl: string): Promise<ExtractedArticle> {
+async function extractReadableHtml(
+  rawHtml: string,
+  sourceUrl: string,
+  fallbackTitle?: string,
+): Promise<ExtractedArticle> {
   const dom = new JSDOM(rawHtml, { url: sourceUrl });
   const document = dom.window.document;
   const source = new URL(sourceUrl);
+  const title = extractHtmlTitle(document, source, fallbackTitle);
+  removeNonReadableNodes(document, source);
   const pageText = normalizeText(document.body?.textContent ?? "");
 
-  if (looksLikeBlockedPage(pageText)) {
-    throw new Error("The site returned a verification or access-check page instead of article content.");
+  if (looksLikeBlockedPage(pageText) || looksLikeUnsupportedShell(pageText)) {
+    throw new ArticleExtractionError(
+      "The site returned a verification or access-check page instead of article content.",
+    );
   }
 
-  const title = extractHtmlTitle(document, source);
-  removeNonReadableNodes(document);
-
   const candidates = [
-    ...collectSelectorCandidates(document, platformContentSelectors(source), title, 800),
+    ...collectSelectorCandidates(document, platformContentSelectors(source), title, 800, source),
     readabilityCandidate(rawHtml, sourceUrl, title),
-    ...collectSelectorCandidates(document, articleContentSelectors, title, 120),
-    ...collectLargeElementCandidates(document, title),
-    bodyCandidate(document, title),
+    ...collectSelectorCandidates(document, articleContentSelectors, title, 120, source),
+    ...collectLargeElementCandidates(document, title, source),
+    bodyCandidate(document, title, source),
   ].filter((candidate): candidate is HtmlCandidate => candidate !== null);
 
   const candidate = bestHtmlCandidate(candidates);
@@ -302,11 +412,18 @@ async function extractReadableHtml(rawHtml: string, sourceUrl: string): Promise<
       return staticBundleArticle;
     }
 
-    throw new Error("No readable article content was found on this page.");
+    throw new ArticleExtractionError(
+      "No readable article content was found on this page.",
+    );
   }
 
-  if (looksLikeBlockedPage(candidate.textContent)) {
-    throw new Error("The extracted page looks like a verification or access-check page.");
+  if (
+    looksLikeBlockedPage(candidate.textContent) ||
+    looksLikeUnsupportedShell(candidate.textContent)
+  ) {
+    throw new ArticleExtractionError(
+      "The extracted page looks like a verification or access-check page.",
+    );
   }
 
   return {
@@ -324,7 +441,8 @@ function readabilityCandidate(
   fallbackTitle: string,
 ): HtmlCandidate | null {
   const dom = new JSDOM(rawHtml, { url: sourceUrl });
-  removeNonReadableNodes(dom.window.document);
+  const source = new URL(sourceUrl);
+  removeNonReadableNodes(dom.window.document, source);
   const parsed = new Readability(dom.window.document).parse();
 
   if (!parsed?.content) {
@@ -336,6 +454,7 @@ function readabilityCandidate(
     parsed.content,
     parsed.textContent || "",
     520,
+    source,
   );
 }
 
@@ -344,6 +463,7 @@ function collectSelectorCandidates(
   selectors: string[],
   fallbackTitle: string,
   baseScore: number,
+  source: URL,
 ) {
   const seen = new Set<Element>();
   const candidates: HtmlCandidate[] = [];
@@ -355,7 +475,12 @@ function collectSelectorCandidates(
       }
 
       seen.add(element);
-      const candidate = candidateFromElement(element, fallbackTitle, baseScore - index * 3);
+      const candidate = candidateFromElement(
+        element,
+        fallbackTitle,
+        baseScore - index * 3,
+        source,
+      );
 
       if (candidate) {
         candidates.push(candidate);
@@ -366,27 +491,32 @@ function collectSelectorCandidates(
   return candidates;
 }
 
-function collectLargeElementCandidates(document: Document, fallbackTitle: string) {
+function collectLargeElementCandidates(
+  document: Document,
+  fallbackTitle: string,
+  source: URL,
+) {
   return Array.from(document.querySelectorAll("article, main, section, div"))
-    .map((element) => candidateFromElement(element, fallbackTitle, 0))
+    .map((element) => candidateFromElement(element, fallbackTitle, 0, source))
     .filter((candidate): candidate is HtmlCandidate => candidate !== null)
     .filter((candidate) => candidate.textContent.length >= 300)
     .sort((a, b) => b.score - a.score)
     .slice(0, 20);
 }
 
-function bodyCandidate(document: Document, fallbackTitle: string) {
+function bodyCandidate(document: Document, fallbackTitle: string, source: URL) {
   if (!document.body) {
     return null;
   }
 
-  return candidateFromElement(document.body, fallbackTitle, -160);
+  return candidateFromElement(document.body, fallbackTitle, -160, source);
 }
 
 function candidateFromElement(
   element: Element,
   fallbackTitle: string,
   baseScore: number,
+  source: URL,
 ): HtmlCandidate | null {
   const textContent = elementReadableText(element);
 
@@ -394,8 +524,13 @@ function candidateFromElement(
     return null;
   }
 
-  const title = titleFromElement(element) || fallbackTitle;
-  return buildHtmlCandidate(title, element.innerHTML, textContent, baseScore);
+  return buildHtmlCandidate(
+    fallbackTitle,
+    element.innerHTML,
+    textContent,
+    baseScore,
+    source,
+  );
 }
 
 function buildHtmlCandidate(
@@ -403,9 +538,13 @@ function buildHtmlCandidate(
   html: string,
   fallbackText: string,
   baseScore: number,
+  source: URL,
 ): HtmlCandidate | null {
   const contentHtml = cleanHtml(html);
-  const blocks = htmlToBlocks(contentHtml);
+  const blocks = normalizeHtmlArticleBlocks(
+    htmlToBlocks(contentHtml, source.href),
+    source,
+  );
   const usableBlocks = blocks.length > 0 ? blocks : blocksFromPlainText(fallbackText);
   const textContent = blocksToText(usableBlocks) || normalizeText(fallbackText);
 
@@ -418,13 +557,17 @@ function buildHtmlCandidate(
     contentHtml: usableBlocks.length > 0 ? blocksToHtml(usableBlocks) : contentHtml,
     blocks: usableBlocks,
     textContent,
-    score: baseScore + scoreArticleCandidate(usableBlocks, textContent),
+    score:
+      baseScore +
+      scoreArticleCandidate(usableBlocks, textContent) -
+      htmlCandidateNoisePenalty(contentHtml, usableBlocks),
   };
 }
 
 function bestHtmlCandidate(candidates: HtmlCandidate[]) {
   return candidates
     .filter((candidate) => !looksLikeBlockedPage(candidate.textContent))
+    .filter((candidate) => !looksLikeUnsupportedShell(candidate.textContent))
     .filter((candidate) => candidate.blocks.length > 0)
     .sort((a, b) => b.score - a.score)[0] ?? null;
 }
@@ -454,6 +597,48 @@ function scoreArticleCandidate(blocks: ArticleBlock[], textContent: string) {
   );
 }
 
+function htmlCandidateNoisePenalty(
+  contentHtml: string,
+  blocks: ArticleBlock[],
+) {
+  const dom = new JSDOM(`<main>${contentHtml}</main>`);
+  const root = dom.window.document.querySelector("main");
+  const totalTextLength = normalizeText(root?.textContent ?? "").length;
+  const linkedTextLength = Array.from(
+    root?.querySelectorAll("a") ?? [],
+  ).reduce(
+    (total, link) =>
+      total + normalizeText(link.textContent ?? "").length,
+    0,
+  );
+  const linkDensity =
+    totalTextLength > 0 ? linkedTextLength / totalTextLength : 0;
+  const boilerplateMarkers = new Set([
+    "advertisement",
+    "careers",
+    "cookie list",
+    "legal",
+    "navigation",
+    "privacy policy",
+    "related articles",
+    "related posts",
+    "sign in",
+    "sign up",
+    "socials",
+    "subscribe",
+    "terms of use",
+  ]);
+  const boilerplateCount = blocks.filter((block) =>
+    boilerplateMarkers.has(normalizeBlockText(block)),
+  ).length;
+
+  return (
+    linkedTextLength / 12 +
+    Math.max(0, linkDensity - 0.18) * 1_200 +
+    boilerplateCount * 45
+  );
+}
+
 function blockTextLength(block: ArticleBlock) {
   return blockToText(block).length;
 }
@@ -470,7 +655,11 @@ function elementReadableText(element: Element) {
   return normalizeText([element.textContent ?? "", ...imageText].join(" "));
 }
 
-function extractHtmlTitle(document: Document, source: URL) {
+function extractHtmlTitle(
+  document: Document,
+  source: URL,
+  fallbackTitle?: string,
+) {
   const selectorTitle = titleSelectors
     .map((selector) => normalizeText(document.querySelector(selector)?.textContent ?? ""))
     .find(Boolean);
@@ -484,15 +673,9 @@ function extractHtmlTitle(document: Document, source: URL) {
     document.querySelector<HTMLMetaElement>('meta[name="twitter:title"]')?.content ||
     document.querySelector<HTMLMetaElement>('meta[name="title"]')?.content;
 
-  return normalizeText(metaTitle || document.title || titleFromUrl(source));
-}
-
-function titleFromElement(element: Element) {
-  const heading = Array.from(element.querySelectorAll("h1, h2, h3"))
-    .map((candidate) => normalizeText(candidate.textContent ?? ""))
-    .find((text) => text.length > 0 && text.length <= 180);
-
-  return heading ?? "";
+  return normalizeText(
+    metaTitle || document.title || fallbackTitle || titleFromUrl(source),
+  );
 }
 
 function platformContentSelectors(source: URL) {
@@ -502,10 +685,19 @@ function platformContentSelectors(source: URL) {
     return ["#js_content", ".rich_media_content"];
   }
 
+  if (host === "linkedin.com" || host.endsWith(".linkedin.com")) {
+    return [
+      ".article-main__content",
+      ".published-content",
+      '[data-test-id="article-content"]',
+      '[data-test-id="main-feed-activity-card__commentary"]',
+    ];
+  }
+
   return [];
 }
 
-function removeNonReadableNodes(document: Document) {
+function removeNonReadableNodes(document: Document, source?: URL) {
   document
     .querySelectorAll(
       [
@@ -524,10 +716,30 @@ function removeNonReadableNodes(document: Document) {
         "nav",
         "header",
         "footer",
+        "[hidden]",
         '[aria-hidden="true"]',
+        '[style*="display: none" i]',
+        '[style*="display:none" i]',
+        '[style*="visibility: hidden" i]',
+        '[style*="visibility:hidden" i]',
+        "#onetrust-consent-sdk",
+        "#onetrust-banner-sdk",
+        "#onetrust-pc-sdk",
+        ".onetrust-pc-dark-filter",
+        ".ot-sdk-container",
       ].join(","),
     )
     .forEach((element) => element.remove());
+
+  if (source && isLinkedInHost(source.hostname)) {
+    document
+      .querySelectorAll('code[id^="bpr-guid"], code[id*="bpr-guid"], code')
+      .forEach((element) => {
+        if (looksLikeLinkedInPayload(normalizeText(element.textContent ?? ""))) {
+          element.remove();
+        }
+      });
+  }
 }
 
 function looksLikeBlockedPage(text: string) {
@@ -553,6 +765,27 @@ function looksLikeBlockedPage(text: string) {
   const isVeryShort = normalized.length < 600;
 
   return markerCount >= 2 || (markerCount >= 1 && isVeryShort);
+}
+
+function looksLikeUnsupportedShell(text: string) {
+  const normalized = normalizeText(text).toLowerCase();
+
+  if (normalized.length > 1_200) {
+    return false;
+  }
+
+  return (
+    (
+      normalized.includes("log in or sign up for x") &&
+      normalized.includes("see what’s happening and join the conversation")
+    ) ||
+    normalized.includes("youtube music is not optimized for your browser") ||
+    (
+      normalized.includes("continue with phone") &&
+      normalized.includes("log in with username or email") &&
+      normalized.includes("trending now")
+    )
+  );
 }
 
 async function extractStaticBundleArticle(
@@ -1304,8 +1537,10 @@ function extractPlainText(
   };
 }
 
-function htmlToBlocks(html: string): ArticleBlock[] {
-  const dom = new JSDOM(`<main>${html}</main>`);
+function htmlToBlocks(html: string, baseUrl?: string): ArticleBlock[] {
+  const dom = new JSDOM(`<main>${html}</main>`, {
+    ...(baseUrl ? { url: baseUrl } : {}),
+  });
   const root = dom.window.document.querySelector("main");
   const blocks: ArticleBlock[] = [];
 
@@ -1320,13 +1555,24 @@ function htmlToBlocks(html: string): ArticleBlock[] {
 
 function visitElement(element: Element, blocks: ArticleBlock[]) {
   const tag = element.tagName.toLowerCase();
-  const text = normalizeText(element.textContent ?? "");
+  const text = elementReadableBlockText(element);
 
   if (tag === "figure") {
-    const image = imageBlockFromElement(element.querySelector("img"), blocks.length, figureCaption(element));
+    const images = Array.from(element.querySelectorAll("img"));
 
-    if (image) {
-      blocks.push(image);
+    for (const [imageIndex, imageElement] of images.entries()) {
+      const image = imageBlockFromElement(
+        imageElement,
+        blocks.length,
+        imageIndex === 0 ? figureCaption(element) : "",
+      );
+
+      if (image) {
+        blocks.push(image);
+      }
+    }
+
+    if (images.length > 0) {
       return;
     }
   }
@@ -1372,7 +1618,7 @@ function visitElement(element: Element, blocks: ArticleBlock[]) {
       });
     }
 
-    Array.from(element.querySelectorAll(":scope > img")).forEach((imageElement) => {
+    Array.from(element.querySelectorAll("img")).forEach((imageElement) => {
       const image = imageBlockFromElement(imageElement, blocks.length);
 
       if (image) {
@@ -1401,9 +1647,24 @@ function visitElement(element: Element, blocks: ArticleBlock[]) {
   }
 
   if (tag === "ul" || tag === "ol") {
-    const items = Array.from(element.children)
-      .filter((child) => child.tagName.toLowerCase() === "li")
-      .map((child) => normalizeText(child.textContent ?? ""))
+    const listItems = Array.from(element.children).filter(
+      (child) => child.tagName.toLowerCase() === "li",
+    );
+    const items = listItems
+      .map((child) =>
+        normalizeTextWithLineBreaks(
+          Array.from(child.childNodes)
+            .filter(
+              (node) =>
+                node.nodeType !== 1 ||
+                !["ul", "ol"].includes(
+                  (node as Element).tagName.toLowerCase(),
+                ),
+            )
+            .map(nodeTextWithBreaks)
+            .join(""),
+        ),
+      )
       .filter(Boolean);
 
     if (items.length > 0) {
@@ -1414,13 +1675,47 @@ function visitElement(element: Element, blocks: ArticleBlock[]) {
         items,
       });
     }
+
+    listItems.forEach((item) => {
+      Array.from(item.children)
+        .filter((child) => ["ul", "ol"].includes(child.tagName.toLowerCase()))
+        .forEach((nestedList) => visitElement(nestedList, blocks));
+    });
     return;
   }
 
   const blockChildren = Array.from(element.children).filter((child) => isBlockElement(child.tagName));
 
   if (blockChildren.length > 0) {
-    blockChildren.forEach((child) => visitElement(child, blocks));
+    let inlineNodes: ChildNode[] = [];
+
+    const flushInlineNodes = () => {
+      const inlineText = normalizeTextWithLineBreaks(
+        inlineNodes.map(nodeTextWithBreaks).join(""),
+      );
+      inlineNodes = [];
+
+      if (inlineText) {
+        blocks.push({
+          id: blockId("paragraph", blocks.length),
+          type: "paragraph",
+          text: inlineText,
+        });
+      }
+    };
+
+    element.childNodes.forEach((child) => {
+      if (
+        child.nodeType === 1 &&
+        isBlockElement((child as Element).tagName)
+      ) {
+        flushInlineNodes();
+        visitElement(child as Element, blocks);
+      } else {
+        inlineNodes.push(child);
+      }
+    });
+    flushInlineNodes();
     return;
   }
 
@@ -1429,6 +1724,41 @@ function visitElement(element: Element, blocks: ArticleBlock[]) {
     type: "paragraph",
     text,
   });
+}
+
+function elementReadableBlockText(element: Element) {
+  return normalizeTextWithLineBreaks(
+    Array.from(element.childNodes).map(nodeTextWithBreaks).join(""),
+  );
+}
+
+function nodeTextWithBreaks(node: ChildNode): string {
+  if (node.nodeType === 3) {
+    return node.textContent ?? "";
+  }
+
+  if (node.nodeType !== 1) {
+    return "";
+  }
+
+  const element = node as Element;
+
+  if (element.tagName.toLowerCase() === "br") {
+    return "\n";
+  }
+
+  return Array.from(element.childNodes).map(nodeTextWithBreaks).join("");
+}
+
+function normalizeTextWithLineBreaks(text: string) {
+  return text
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .filter((line, index, lines) => line || (index > 0 && lines[index - 1]))
+    .join("\n")
+    .trim();
 }
 
 function imageBlockFromElement(
@@ -1548,13 +1878,343 @@ function ensureBlocks(blocks: ArticleBlock[], fallbackText: string): ArticleBloc
     return fallbackBlocks;
   }
 
-  return [
-    {
-      id: "paragraph-0",
-      type: "paragraph",
-      text: "No readable text was extracted.",
-    },
+  throw new ArticleExtractionError(
+    "No readable text was extracted. Scanned documents may require OCR.",
+  );
+}
+
+function normalizeHtmlArticleBlocks(blocks: ArticleBlock[], source: URL) {
+  const host = source.hostname.toLowerCase();
+  let normalized = compactBlocks(
+    blocks.filter(
+      (block) =>
+        !(
+          isLinkedInHost(host) &&
+          isLinkedInNoiseBlock(block)
+        ),
+    ),
+  );
+
+  if (
+    (host === "periodic.com" || host.endsWith(".periodic.com")) &&
+    source.pathname === "/"
+  ) {
+    const contentStart = normalized.findIndex(
+      (block) => normalizeBlockText(block) === "accelerate science",
+    );
+
+    if (contentStart > 0 && contentStart <= 12) {
+      normalized = normalized.slice(contentStart);
+    }
+  }
+
+  if (host === "163.com" || host.endsWith(".163.com")) {
+    const shareBoundary = normalized
+      .slice(0, 12)
+      .findIndex(
+        (block) => normalizeBlockText(block) === "分享至好友和朋友圈",
+      );
+
+    if (shareBoundary >= 0) {
+      normalized = normalized.slice(shareBoundary + 1);
+    }
+  }
+
+  normalized = removeRepeatedBlockRuns(normalized);
+
+  if (host === "periodic.com" || host.endsWith(".periodic.com")) {
+    normalized = removeNearbyRepeatedText(normalized);
+  }
+
+  normalized = trimTrailingCookiePanel(normalized);
+  normalized = trimTrailingSiteChrome(normalized);
+
+  if (host === "zoom.com" || host.endsWith(".zoom.com")) {
+    normalized = trimBeforeText(normalized, "subscribe to the zoom blog");
+  }
+
+  if (host === "trajectory.ai" || host.endsWith(".trajectory.ai")) {
+    normalized = trimTrajectoryRecommendations(normalized);
+  }
+
+  if (host === "periodic.com" || host.endsWith(".periodic.com")) {
+    normalized = trimBeforeText(normalized, "follow on x");
+  }
+
+  if (isLinkedInHost(host)) {
+    normalized = trimLinkedInActions(normalized);
+  }
+
+  if (host === "163.com" || host.endsWith(".163.com")) {
+    normalized = trimAfterText(normalized, "全文完。");
+  }
+
+  return normalized.map((block, index) => ({
+    ...block,
+    id: blockId(block.type, index),
+  }));
+}
+
+function removeRepeatedBlockRuns(blocks: ArticleBlock[]) {
+  const signatures = blocks.map(blockSignature);
+  const removed = new Set<number>();
+
+  for (let later = 1; later < blocks.length; later += 1) {
+    if (removed.has(later) || !signatures[later]) {
+      continue;
+    }
+
+    for (let earlier = 0; earlier < later; earlier += 1) {
+      if (
+        removed.has(earlier) ||
+        signatures[earlier] !== signatures[later]
+      ) {
+        continue;
+      }
+
+      let runLength = 0;
+      let readableLength = 0;
+
+      while (
+        earlier + runLength < later &&
+        later + runLength < blocks.length &&
+        signatures[earlier + runLength] === signatures[later + runLength]
+      ) {
+        readableLength += blockToText(blocks[later + runLength]).length;
+        runLength += 1;
+      }
+
+      if (runLength < 3 || readableLength < 40) {
+        continue;
+      }
+
+      for (let offset = 0; offset < runLength; offset += 1) {
+        removed.add(later + offset);
+      }
+      later += runLength - 1;
+      break;
+    }
+  }
+
+  return blocks.filter((_, index) => !removed.has(index));
+}
+
+function removeNearbyRepeatedText(blocks: ArticleBlock[]) {
+  const seen = new Map<string, number>();
+
+  return blocks.filter((block, index) => {
+    const text = normalizeBlockText(block);
+
+    if (text.length < 24) {
+      return true;
+    }
+
+    const previousIndex = seen.get(text);
+    seen.set(text, index);
+    return previousIndex === undefined || index - previousIndex > 6;
+  });
+}
+
+function trimTrailingCookiePanel(blocks: ArticleBlock[]) {
+  const cookieMarkers = [
+    "manage consent preferences",
+    "privacy preference center",
+    "your privacy choices",
+    "strictly necessary cookies",
+    "functional cookies",
+    "performance cookies",
+    "personalization cookies",
+    "advertising cookies",
+    "cookie list",
+    "consent leg.interest",
   ];
+
+  for (let index = 0; index < blocks.length; index += 1) {
+    if (textLengthBefore(blocks, index) < 300) {
+      continue;
+    }
+
+    const text = normalizeBlockText(blocks[index]);
+
+    if (!cookieMarkers.some((marker) => text.includes(marker))) {
+      continue;
+    }
+
+    const suffix = blocks
+      .slice(index)
+      .map(normalizeBlockText)
+      .join(" ");
+    const markerCount = cookieMarkers.filter((marker) =>
+      suffix.includes(marker),
+    ).length;
+
+    if (markerCount >= 3) {
+      return blocks.slice(0, index);
+    }
+  }
+
+  return blocks;
+}
+
+function trimTrailingSiteChrome(blocks: ArticleBlock[]) {
+  const exactMarkers = new Set([
+    "docs",
+    "careers",
+    "navigation",
+    "socials",
+    "linkedin",
+    "x",
+    "legal",
+    "privacy policy",
+    "terms of use",
+    "follow on x",
+    "follow on linkedin",
+  ]);
+
+  for (let index = 0; index < blocks.length; index += 1) {
+    if (textLengthBefore(blocks, index) < 400) {
+      continue;
+    }
+
+    const boundaryText = normalizeBlockText(blocks[index]);
+
+    if (
+      !exactMarkers.has(boundaryText) &&
+      !boundaryText.includes("straight into your inbox") &&
+      !/^©\s*\d{4}$/.test(boundaryText)
+    ) {
+      continue;
+    }
+
+    const window = blocks
+      .slice(index, index + 24)
+      .map(normalizeBlockText);
+    const markerCount = new Set(
+      window.filter(
+        (text) => exactMarkers.has(text) || /©\s*\d{4}$/.test(text),
+      ),
+    ).size;
+
+    if (markerCount >= 4) {
+      return blocks.slice(0, index);
+    }
+  }
+
+  return blocks;
+}
+
+function trimLinkedInActions(blocks: ArticleBlock[]) {
+  for (let index = 0; index < blocks.length; index += 1) {
+    if (
+      textLengthBefore(blocks, index) >= 300 &&
+      normalizeBlockText(blocks[index]) === "comments"
+    ) {
+      return blocks.slice(0, index);
+    }
+
+    if (
+      textLengthBefore(blocks, index) >= 300 &&
+      normalizeBlockText(blocks[index]) === "save" &&
+      blocks
+        .slice(index + 1, index + 4)
+        .some((block) => normalizeBlockText(block) === "comment")
+    ) {
+      return blocks.slice(0, index);
+    }
+  }
+
+  return blocks;
+}
+
+function trimBeforeText(
+  blocks: ArticleBlock[],
+  boundaryText: string,
+  minimumBodyLength = 300,
+) {
+  const normalizedBoundary = normalizeText(boundaryText).toLowerCase();
+  const boundary = blocks.findIndex(
+    (block, index) =>
+      textLengthBefore(blocks, index) >= minimumBodyLength &&
+      normalizeBlockText(block) === normalizedBoundary,
+  );
+
+  return boundary >= 0 ? blocks.slice(0, boundary) : blocks;
+}
+
+function trimTrajectoryRecommendations(blocks: ArticleBlock[]) {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    if (
+      index >= blocks.length - 3 &&
+      textLengthBefore(blocks, index) >= 300 &&
+      /^no\.\s*\d+/i.test(normalizeText(blockToText(blocks[index])))
+    ) {
+      return blocks.slice(0, index);
+    }
+  }
+
+  return blocks;
+}
+
+function trimAfterText(blocks: ArticleBlock[], boundaryText: string) {
+  const normalizedBoundary = normalizeText(boundaryText).toLowerCase();
+  const boundary = blocks.findIndex(
+    (block) => normalizeBlockText(block) === normalizedBoundary,
+  );
+
+  return boundary >= 0 ? blocks.slice(0, boundary + 1) : blocks;
+}
+
+function textLengthBefore(blocks: ArticleBlock[], index: number) {
+  return blocks
+    .slice(0, index)
+    .reduce((total, block) => total + blockToText(block).length, 0);
+}
+
+function normalizeBlockText(block: ArticleBlock) {
+  return normalizeText(blockToText(block)).toLowerCase();
+}
+
+function blockSignature(block: ArticleBlock) {
+  const text = normalizeBlockText(block);
+
+  if (text) {
+    return `${block.type}:${text}`;
+  }
+
+  if (block.type === "image") {
+    return `image:${block.src ?? block.originalSrc ?? block.artifactKey ?? ""}`;
+  }
+
+  return "";
+}
+
+function isLinkedInHost(host: string) {
+  const normalized = host.toLowerCase();
+  return normalized === "linkedin.com" || normalized.endsWith(".linkedin.com");
+}
+
+function isLinkedInNoiseBlock(block: ArticleBlock) {
+  const text = normalizeText(blockToText(block));
+  return /^urn:li:page:/i.test(text) || looksLikeLinkedInPayload(text);
+}
+
+function looksLikeLinkedInPayload(text: string) {
+  const normalized = normalizeText(text);
+
+  if (normalized.length < 120) {
+    return false;
+  }
+
+  const markerCount = [
+    '"request":"/voyager/api/',
+    '"entityUrn":"urn:li:',
+    '"$type":"com.linkedin.',
+    '"$recipeTypes"',
+    "voyagerFeedDash",
+    "bpr-guid-",
+  ].filter((marker) => normalized.includes(marker)).length;
+
+  return markerCount >= 1 && /^[{[]/.test(normalized);
 }
 
 function compactBlocks(blocks: ArticleBlock[]) {

@@ -9,6 +9,7 @@ import {
   ArticleDeduplicationIndex,
   type ArticleDeduplicationReason,
 } from "@/server/articles/articleDeduplication";
+import { ArticleExtractionError } from "@/lib/extractors";
 import type { Article } from "@/lib/types";
 import { getArticleRepository } from "@/server/runtime/articleRepository";
 import {
@@ -528,7 +529,7 @@ async function importDropboxFile(
   });
 }
 
-function shouldFallbackToBookmarkUrl(error: unknown, rawUrl: string) {
+export function shouldFallbackToBookmarkUrl(error: unknown, rawUrl: string) {
   let url: URL;
 
   try {
@@ -542,9 +543,12 @@ function shouldFallbackToBookmarkUrl(error: unknown, rawUrl: string) {
   }
 
   return (
-    error instanceof InstapaperApiError &&
-    !error.retryable &&
-    error.kind !== "configuration"
+    error instanceof ArticleExtractionError ||
+    (
+      error instanceof InstapaperApiError &&
+      !error.retryable &&
+      error.kind !== "configuration"
+    )
   );
 }
 

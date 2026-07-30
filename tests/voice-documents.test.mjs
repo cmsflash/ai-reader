@@ -64,6 +64,40 @@ test("decodes base64 HTML and falls back to the part content location", () => {
   });
 });
 
+test("honors the MHTML start Content-ID across nested multipart parts", () => {
+  const mhtml = [
+    "MIME-Version: 1.0",
+    'Content-Type: multipart/related; boundary="outer"; start="<root-part>"',
+    "",
+    "--outer",
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-ID: <wrong-part>",
+    "",
+    "<html><body>Wrong HTML root</body></html>",
+    "--outer",
+    'Content-Type: multipart/alternative; boundary="inner"',
+    "",
+    "--inner",
+    "Content-Type: text/plain; charset=UTF-8",
+    "",
+    "Text alternative",
+    "--inner",
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-ID: <root-part>",
+    "Content-Location: https://example.com/correct-root",
+    "",
+    "<html><body>Correct HTML root</body></html>",
+    "--inner--",
+    "--outer--",
+    "",
+  ].join("\r\n");
+
+  assert.deepEqual(decodeVoiceMhtml(Buffer.from(mhtml, "latin1")), {
+    html: "<html><body>Correct HTML root</body></html>",
+    sourceUrl: "https://example.com/correct-root",
+  });
+});
+
 test("decodes @Voice MHTML.ZIP metadata and deflated index.html", () => {
   const html = [
     "<!-- Hyperionics-OriginHtml https://example.net/article?id=7 -->",
@@ -95,6 +129,27 @@ test("uses the ZIP avarUrl when index.html has no origin marker", () => {
     html,
     title: "Comment metadata",
     sourceUrl: "https://example.com/from-comment",
+  });
+});
+
+test("accepts index.htm, sniffs its charset, and reads LdAsIs origin", () => {
+  const html = Buffer.concat([
+    Buffer.from(
+      '<!-- Hyperionics-LdAsIsHtml https://example.com/cafe --><meta charset="windows-1252"><p>Caf',
+      "ascii",
+    ),
+    Buffer.from([0xe9]),
+    Buffer.from("</p>", "ascii"),
+  ]);
+  const archive = createZip(
+    [{ name: "saved/index.htm", content: html }],
+    "avarTitle: Café archive",
+  );
+
+  assert.deepEqual(decodeVoiceMhtmlZip(archive), {
+    html: '<!-- Hyperionics-LdAsIsHtml https://example.com/cafe --><meta charset="windows-1252"><p>Café</p>',
+    title: "Café archive",
+    sourceUrl: "https://example.com/cafe",
   });
 });
 

@@ -20,6 +20,18 @@ test("canonicalizes equivalent article URLs without tracking parameters", () => 
     "http://www.example.com/story?a=1&b=2",
   );
   assert.equal(canonicalizeArticleUrl("file:///tmp/story"), undefined);
+  assert.equal(
+    canonicalizeArticleUrl(
+      "https://newsletter.example.com/p/story?_bhlid=campaign&trackingId=reader&trk=feed&publication_id=7&post_id=8&isFreemail=false&r=abc&triedRedirect=true&utm_source=substack",
+    ),
+    "https://newsletter.example.com/p/story",
+  );
+  assert.equal(
+    canonicalizeArticleUrl(
+      "https://example.com/story?post_id=8&publication_id=7&r=article",
+    ),
+    "https://example.com/story?post_id=8&publication_id=7&r=article",
+  );
 });
 
 test("deduplicates formatting variants by normalized article content", () => {
@@ -218,6 +230,36 @@ test("a reused source URL does not hide materially changed content", () => {
   assert.equal(
     new ArticleDeduplicationIndex([canonical]).find(changed),
     null,
+  );
+});
+
+test("same-source containment survives a large saved-page boilerplate tail", () => {
+  const body = Array.from(
+    { length: 80 },
+    (_, index) =>
+      `Section ${index} documents a distinct observation, supporting evidence, and the resulting conclusion for this report.`,
+  ).join("\n");
+  const canonical = article({
+    id: "clean-reader-copy",
+    title: "Long report",
+    sourceUrl: "https://example.com/long-report",
+    textContent: body,
+  });
+  const archived = article({
+    id: "archive-with-chrome",
+    title: "Long report",
+    sourceUrl: "https://example.com/long-report?utm_source=reader",
+    textContent: `${body}\n${Array.from(
+      { length: 100 },
+      (_, index) =>
+        `Unrelated recommendation card ${index} promotes another story, newsletter, or navigation destination.`,
+    ).join("\n")}`,
+  });
+
+  assert.ok(archived.textContent.length > canonical.textContent.length * 1.8);
+  assert.equal(
+    new ArticleDeduplicationIndex([canonical]).find(archived)?.reason,
+    "near-identical-content",
   );
 });
 

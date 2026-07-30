@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "db:migrate": "node scripts/migrate-postgres.mjs",
-    "db:import-local": "node scripts/import-local-json-to-postgres.mjs"
+    "db:import-local": "node scripts/import-local-json-to-postgres.mjs",
+    "repair:extractions": "node scripts/repair-extractions.mjs"
   },
   "dependencies": {
     "@babel/parser": "^8.0.0",

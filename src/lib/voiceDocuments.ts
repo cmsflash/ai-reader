@@ -54,9 +54,18 @@ export function decodeVoiceMhtml(input: BinaryInput): VoiceDocument {
     throw new Error("Invalid MHTML document: multipart boundary is missing.");
   }
 
-  const htmlPart = splitMultipartBody(topLevel.body, boundary)
-    .map(parseMimeEntity)
-    .find((part) => isHtmlContentType(part.headers.get("content-type")));
+  const startContentId = normalizeContentId(
+    readMimeParameter(contentType, "start"),
+  );
+  const htmlParts = collectMimeLeafParts(topLevel).filter((part) =>
+    isHtmlContentType(part.headers.get("content-type")),
+  );
+  const htmlPart =
+    htmlParts.find(
+      (part) =>
+        startContentId &&
+        normalizeContentId(part.headers.get("content-id")) === startContentId,
+    ) ?? htmlParts[0];
 
   if (!htmlPart) {
     throw new Error("Invalid MHTML document: no HTML MIME part was found.");
@@ -90,10 +99,12 @@ export function decodeVoiceMhtmlZip(input: BinaryInput): VoiceDocument {
   const indexEntry = selectIndexHtml(entries);
 
   if (!indexEntry) {
-    throw new Error("Invalid MHTML.ZIP document: index.html was not found.");
+    throw new Error(
+      "Invalid MHTML.ZIP document: index.html was not found (index.htm was also checked).",
+    );
   }
 
-  const html = decodeBytes(readZipEntry(archive, indexEntry), "utf-8");
+  const html = decodeHtmlBytes(readZipEntry(archive, indexEntry));
   const title = optionalText(readAvarCommentValue(comment, "avarTitle"));
   const sourceUrl =
     readHyperionicsOrigin(html) ??
@@ -178,6 +189,20 @@ function splitMultipartBody(body: string, boundary: string) {
   return parts;
 }
 
+function collectMimeLeafParts(entity: MimeEntity): MimeEntity[] {
+  const contentType = entity.headers.get("content-type") ?? "";
+  const mimeType = contentType.split(";", 1)[0]?.trim().toLowerCase();
+  const boundary = readMimeParameter(contentType, "boundary");
+
+  if (!mimeType.startsWith("multipart/") || !boundary) {
+    return [entity];
+  }
+
+  return splitMultipartBody(entity.body, boundary)
+    .map(parseMimeEntity)
+    .flatMap(collectMimeLeafParts);
+}
+
 function isHtmlContentType(contentType?: string) {
   const mimeType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
   return mimeType === "text/html" || mimeType === "application/xhtml+xml";
@@ -253,7 +278,9 @@ function decodeMimeWords(value: string) {
 
 function readHyperionicsOrigin(html: string) {
   const match =
-    /<!--\s*Hyperionics-OriginHtml\s+([\s\S]*?)\s*-->/i.exec(html);
+    /<!--\s*Hyperionics-(?:OriginHtml|LdAsIsHtml)\s+([\s\S]*?)\s*-->/i.exec(
+      html,
+    );
   return optionalHttpUrl(match?.[1]);
 }
 
@@ -365,7 +392,9 @@ function selectIndexHtml(entries: ZipEntry[]) {
 
   return (
     normalized.find(({ name }) => name === "index.html")?.entry ??
-    normalized.find(({ name }) => name.endsWith("/index.html"))?.entry
+    normalized.find(({ name }) => name === "index.htm")?.entry ??
+    normalized.find(({ name }) => name.endsWith("/index.html"))?.entry ??
+    normalized.find(({ name }) => name.endsWith("/index.htm"))?.entry
   );
 }
 
@@ -422,6 +451,30 @@ function decodeBytes(bytes: Uint8Array, charset: string) {
   } catch {
     return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   }
+}
+
+function decodeHtmlBytes(bytes: Uint8Array) {
+  const buffer = Buffer.from(bytes);
+  const bomEncoding =
+    buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf
+      ? "utf-8"
+      : buffer[0] === 0xff && buffer[1] === 0xfe
+        ? "utf-16le"
+        : buffer[0] === 0xfe && buffer[1] === 0xff
+          ? "utf-16be"
+          : undefined;
+  const prefix = buffer.subarray(0, 8_192).toString("latin1");
+  const declaredEncoding =
+    /<meta\b[^>]*\bcharset\s*=\s*["']?\s*([^"'\s/>]+)/i.exec(prefix)?.[1] ||
+    /<meta\b[^>]*\bcontent\s*=\s*["'][^"']*\bcharset\s*=\s*([^;"'\s]+)/i.exec(
+      prefix,
+    )?.[1];
+
+  return decodeBytes(buffer, bomEncoding ?? declaredEncoding ?? "utf-8");
+}
+
+function normalizeContentId(value?: string | null) {
+  return optionalText(value)?.replace(/^<|>$/g, "").toLowerCase();
 }
 
 function toBuffer(input: BinaryInput) {

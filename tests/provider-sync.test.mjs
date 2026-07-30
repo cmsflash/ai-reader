@@ -45,7 +45,9 @@ const {
   recoveredImportOutcome,
   remainingCandidateCount,
   retryPendingCleanup,
+  shouldFallbackToBookmarkUrl,
 } = await import("../src/server/integrations/providerSync.ts");
+const { ArticleExtractionError } = await import("../src/lib/extractors.ts");
 
 test("same-provider recovery is reconciled instead of deduplicated", () => {
   const recovered = recoveredImportOutcome({
@@ -71,6 +73,23 @@ test("only resolved candidates reduce the remaining count", () => {
     4,
   );
   assert.equal(remainingCandidateCount(1, 1, 1, 1), 0);
+});
+
+test("falls back to the live URL when Instapaper text is not an article", () => {
+  assert.equal(
+    shouldFallbackToBookmarkUrl(
+      new ArticleExtractionError("The saved text is an access shell."),
+      "https://example.com/article",
+    ),
+    true,
+  );
+  assert.equal(
+    shouldFallbackToBookmarkUrl(
+      new ArticleExtractionError("The saved text is an access shell."),
+      "file:///tmp/article",
+    ),
+    false,
+  );
 });
 
 test("failed candidates rotate oldest-first after new work", () => {

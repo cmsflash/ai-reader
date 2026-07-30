@@ -33,8 +33,12 @@ const MIN_JACCARD_SIMILARITY = 0.82;
 const MIN_CONTAINMENT_SIMILARITY = 0.92;
 const SHINGLE_LENGTH = 32;
 const MAX_SHINGLES = 6_000;
+const SOURCE_WORD_SHINGLE_LENGTH = 8;
+const MAX_SOURCE_WORD_SHINGLES = 12_000;
 const TRACKING_PARAMETER =
-  /^(?:utm_.+|fbclid|gclid|dclid|mc_cid|mc_eid)$/i;
+  /^(?:utm_.+|fbclid|gclid|dclid|mc_cid|mc_eid|_bhlid|trackingId|trk|trkInfo)$/i;
+const SUBSTACK_TRACKING_PARAMETER =
+  /^(?:publication_id|post_id|isFreemail|r|triedRedirect)$/i;
 
 export class ArticleDeduplicationIndex {
   private readonly entries: IndexedArticle[] = [];
@@ -127,8 +131,12 @@ export class ArticleDeduplicationIndex {
           incoming.normalizedContent.length,
           candidate.normalizedContent.length,
         );
+      const sameCanonicalUrl = Boolean(
+        incoming.canonicalUrl &&
+          candidate.canonicalUrl === incoming.canonicalUrl,
+      );
 
-      if (lengthRatio < MIN_LENGTH_RATIO) {
+      if (lengthRatio < MIN_LENGTH_RATIO && !sameCanonicalUrl) {
         continue;
       }
 
@@ -136,19 +144,26 @@ export class ArticleDeduplicationIndex {
         incoming.shingles,
         candidate.shingles,
       );
+      const sourceContainment = sameCanonicalUrl
+        ? sourceWordShingleContainment(
+            incoming.normalizedContent,
+            candidate.normalizedContent,
+          )
+        : 0;
 
-      if (
-        similarity.jaccard < MIN_JACCARD_SIMILARITY &&
-        similarity.containment < MIN_CONTAINMENT_SIMILARITY
-      ) {
+      const similarityThresholdMet =
+        lengthRatio >= MIN_LENGTH_RATIO
+          ? similarity.jaccard >= MIN_JACCARD_SIMILARITY ||
+            similarity.containment >= MIN_CONTAINMENT_SIMILARITY ||
+            sourceContainment >= 0.7
+          : similarity.containment >= 0.97 || sourceContainment >= 0.7;
+
+      if (!similarityThresholdMet) {
         continue;
       }
 
       const corroborated =
-        Boolean(
-          incoming.canonicalUrl &&
-            candidate.canonicalUrl === incoming.canonicalUrl,
-        ) ||
+        sameCanonicalUrl ||
         titlesCorroborate(incoming.normalizedTitle, candidate.normalizedTitle) ||
         similarity.jaccard >= 0.9 ||
         similarity.containment >= 0.97;
@@ -157,7 +172,11 @@ export class ArticleDeduplicationIndex {
         continue;
       }
 
-      const score = Math.max(similarity.jaccard, similarity.containment);
+      const score = Math.max(
+        similarity.jaccard,
+        similarity.containment,
+        sourceContainment,
+      );
 
       if (
         !best ||
@@ -199,9 +218,24 @@ export function canonicalizeArticleUrl(rawUrl?: string) {
 
     url.hash = "";
     url.hostname = url.hostname.toLowerCase();
+    const substackUrl =
+      url.hostname === "substack.com" ||
+      url.hostname.endsWith(".substack.com") ||
+      (
+        url.pathname.startsWith("/p/") &&
+        (
+          ["publication_id", "post_id", "isFreemail", "triedRedirect"].some(
+            (key) => url.searchParams.has(key),
+          ) ||
+          url.searchParams.get("utm_source")?.toLowerCase() === "substack"
+        )
+      );
 
     for (const key of Array.from(url.searchParams.keys())) {
-      if (TRACKING_PARAMETER.test(key)) {
+      if (
+        TRACKING_PARAMETER.test(key) ||
+        (substackUrl && SUBSTACK_TRACKING_PARAMETER.test(key))
+      ) {
         url.searchParams.delete(key);
       }
     }
@@ -403,6 +437,77 @@ function shingleSimilarity(left: Set<number>, right: Set<number>) {
     jaccard: shared / Math.max(left.size + right.size - shared, 1),
     containment: shared / Math.max(smaller.size, 1),
   };
+}
+
+function sourceWordShingleContainment(left: string, right: string) {
+  const leftTokens = articleTokens(left);
+  const rightTokens = articleTokens(right);
+  const smaller =
+    leftTokens.length <= rightTokens.length ? leftTokens : rightTokens;
+  const larger = smaller === leftTokens ? rightTokens : leftTokens;
+
+  if (smaller.length < SOURCE_WORD_SHINGLE_LENGTH) {
+    return 0;
+  }
+
+  const sampleStep = Math.max(
+    1,
+    Math.ceil(
+      (smaller.length - SOURCE_WORD_SHINGLE_LENGTH + 1) /
+        MAX_SOURCE_WORD_SHINGLES,
+    ),
+  );
+  const sampled = tokenShingleHashes(smaller, sampleStep);
+  const available = tokenShingleHashes(larger, 1);
+  let shared = 0;
+
+  for (const hash of sampled) {
+    if (available.has(hash)) {
+      shared += 1;
+    }
+  }
+
+  return shared / Math.max(sampled.size, 1);
+}
+
+function articleTokens(content: string) {
+  return (
+    content.match(
+      /\p{Script=Han}|[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu,
+    ) ?? []
+  );
+}
+
+function tokenShingleHashes(tokens: string[], step: number) {
+  const hashes = new Set<number>();
+
+  for (
+    let index = 0;
+    index <= tokens.length - SOURCE_WORD_SHINGLE_LENGTH;
+    index += step
+  ) {
+    let hash = 0x811c9dc5;
+
+    for (
+      let offset = 0;
+      offset < SOURCE_WORD_SHINGLE_LENGTH;
+      offset += 1
+    ) {
+      const token = tokens[index + offset];
+
+      for (let character = 0; character < token.length; character += 1) {
+        hash ^= token.charCodeAt(character);
+        hash = Math.imul(hash, 0x01000193);
+      }
+
+      hash ^= 0;
+      hash = Math.imul(hash, 0x01000193);
+    }
+
+    hashes.add(hash >>> 0);
+  }
+
+  return hashes;
 }
 
 function appendMapValue<T>(map: Map<string, T[]>, key: string, value: T) {
