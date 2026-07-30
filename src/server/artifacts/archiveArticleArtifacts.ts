@@ -6,20 +6,49 @@ import { fetchPublicImageResource } from "@/server/security/publicArticleUrl";
 import type { Article, ArticleBlock } from "@/lib/types";
 
 const maxArtifactBytes = 30 * 1024 * 1024;
+const artifactArchiveTimeoutMs = 18_000;
 
-export async function archiveArticleArtifacts(article: Article): Promise<Article> {
+type ArchiveArticleArtifactsOptions = {
+  timeoutMs?: number;
+};
+
+export async function archiveArticleArtifacts(
+  article: Article,
+  options: ArchiveArticleArtifactsOptions = {},
+): Promise<Article> {
   let changed = false;
   const archivedBlocks: ArticleBlock[] = [];
+  const controller = new AbortController();
+  const requestedTimeoutMs = options.timeoutMs;
+  const timeoutMs =
+    typeof requestedTimeoutMs === "number" &&
+    Number.isFinite(requestedTimeoutMs) &&
+    requestedTimeoutMs > 0
+      ? Math.trunc(requestedTimeoutMs)
+      : artifactArchiveTimeoutMs;
+  const timeout = setTimeout(
+    () => controller.abort(),
+    timeoutMs,
+  );
 
-  for (const [index, block] of article.blocks.entries()) {
-    if (block.type !== "image") {
-      archivedBlocks.push(block);
-      continue;
+  try {
+    for (const [index, block] of article.blocks.entries()) {
+      if (block.type !== "image" || controller.signal.aborted) {
+        archivedBlocks.push(block);
+        continue;
+      }
+
+      const archived = await archiveImageBlock(
+        article,
+        block,
+        index,
+        controller.signal,
+      );
+      changed ||= archived !== block;
+      archivedBlocks.push(archived);
     }
-
-    const archived = await archiveImageBlock(article, block, index);
-    changed ||= archived !== block;
-    archivedBlocks.push(archived);
+  } finally {
+    clearTimeout(timeout);
   }
 
   if (!changed) {
@@ -46,6 +75,7 @@ async function archiveImageBlock(
   article: Article,
   block: Extract<ArticleBlock, { type: "image" }>,
   index: number,
+  signal: AbortSignal,
 ) {
   const source = remoteImageUrl(block.originalSrc ?? block.src);
 
@@ -59,6 +89,7 @@ async function archiveImageBlock(
       source.href,
       {
         headers: imageFetchHeaders(source, sourceUrl),
+        signal,
       },
       maxArtifactBytes,
     );
