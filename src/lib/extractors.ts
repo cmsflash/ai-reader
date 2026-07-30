@@ -247,59 +247,6 @@ function buildArticle(extracted: ExtractedArticle): Article {
   };
 }
 
-export function repairArticleExtraction(article: Article): Article {
-  const source = optionalArticleUrl(article.sourceUrl);
-
-  if (!source || article.sourceType !== "url") {
-    return article;
-  }
-
-  const blocks = normalizeHtmlArticleBlocks(article.blocks, source);
-  const textContent = blocksToText(blocks);
-  const wordCount = countWords(textContent);
-  const sentenceCount = annotateBlocks(blocks).sentences.length;
-  const progressSentenceIndex = Math.round(
-    article.progress.percent * Math.max(sentenceCount - 1, 0),
-  );
-
-  if (
-    blocks.length === 0 ||
-    textContent.length < 80 ||
-    looksLikeBlockedPage(textContent) ||
-    looksLikeUnsupportedShell(textContent)
-  ) {
-    throw new ArticleExtractionError(
-      "The stored page does not contain repairable article content.",
-    );
-  }
-
-  if (
-    textContent === article.textContent &&
-    JSON.stringify(blocks) === JSON.stringify(article.blocks) &&
-    progressSentenceIndex === article.progress.sentenceIndex
-  ) {
-    return article;
-  }
-
-  const now = new Date().toISOString();
-
-  return {
-    ...article,
-    updatedAt: now,
-    wordCount,
-    estimatedMinutes: Math.max(1, Math.ceil(wordCount / 230)),
-    sentenceCount,
-    progress: {
-      ...article.progress,
-      sentenceIndex: progressSentenceIndex,
-      updatedAt: now,
-    },
-    contentHtml: blocksToHtml(blocks),
-    textContent,
-    blocks,
-  };
-}
-
 function optionalPublicUrl(rawUrl?: string) {
   if (!rawUrl) {
     return undefined;
@@ -313,11 +260,6 @@ function optionalPublicUrl(rawUrl?: string) {
   } catch {
     return undefined;
   }
-}
-
-function optionalArticleUrl(rawUrl?: string) {
-  const normalized = optionalPublicUrl(rawUrl);
-  return normalized ? new URL(normalized) : undefined;
 }
 
 function decodeTextBuffer(buffer: Buffer, contentType = "") {

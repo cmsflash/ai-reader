@@ -55,7 +55,6 @@ function resolveSourceFile(basePath) {
 const {
   articleFromFile,
   articleFromHtml,
-  repairArticleExtraction,
 } = await import("../src/lib/extractors.ts");
 
 const articleParagraphs = Array.from(
@@ -240,32 +239,6 @@ test("deduplicates repeated responsive content on a landing page", async () => {
   assert.doesNotMatch(article.textContent, /^Careers/);
   assert.match(article.textContent, /Academic Grant Program/);
   assert.doesNotMatch(article.textContent, /follow on x|Periodic Labs ©/);
-});
-
-test("remaps stored sentence progress after extraction changes", async () => {
-  const article = await articleFromHtml(
-    `
-      <html><body><article>
-        <h1>Progress mapping</h1>
-        ${articleParagraphs.map((paragraph) => `<p>${paragraph}</p>`).join("")}
-      </article></body></html>
-    `,
-    { sourceUrl: "https://example.com/progress-mapping" },
-  );
-  const repaired = repairArticleExtraction({
-    ...article,
-    progress: {
-      ...article.progress,
-      sentenceIndex: article.sentenceCount - 1,
-      percent: 0.25,
-    },
-  });
-
-  assert.equal(
-    repaired.progress.sentenceIndex,
-    Math.round(0.25 * Math.max(repaired.sentenceCount - 1, 0)),
-  );
-  assert.equal(repaired.progress.percent, 0.25);
 });
 
 test("uses the article boundary on 163.com and excludes related-news tails", async () => {
