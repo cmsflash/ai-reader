@@ -35,6 +35,62 @@ export function isIntegrationOwner(email: string | null | undefined) {
   return Boolean(ownerEmail && email && ownerEmail === normalizeEmail(email));
 }
 
+export type PreviewTestOwnerResolution =
+  | {
+      isConfiguredDelegate: false;
+      ownerEmail: null;
+    }
+  | {
+      isConfiguredDelegate: true;
+      ownerEmail: string | null;
+    };
+
+export function resolvePreviewTestOwnerEmail(
+  userId: string | null | undefined,
+  verifiedEmail: string | null | undefined,
+): PreviewTestOwnerResolution {
+  const previewTestUserId = process.env.AI_READER_PREVIEW_TEST_USER_ID?.trim();
+
+  if (!previewTestUserId || !userId || userId !== previewTestUserId) {
+    return {
+      isConfiguredDelegate: false,
+      ownerEmail: null,
+    };
+  }
+
+  if (process.env.VERCEL !== "1" || process.env.VERCEL_ENV !== "preview") {
+    return {
+      isConfiguredDelegate: true,
+      ownerEmail: null,
+    };
+  }
+
+  const importOwnerEmail = explicitOwnerEmail(
+    process.env.AI_READER_IMPORT_OWNER_EMAIL,
+  );
+  const integrationOwnerEmail = explicitOwnerEmail(
+    process.env.AI_READER_INTEGRATION_OWNER_EMAIL,
+  );
+
+  if (
+    !importOwnerEmail ||
+    !integrationOwnerEmail ||
+    importOwnerEmail !== integrationOwnerEmail ||
+    !isEmailAllowed(importOwnerEmail) ||
+    !isEmailAllowed(verifiedEmail)
+  ) {
+    return {
+      isConfiguredDelegate: true,
+      ownerEmail: null,
+    };
+  }
+
+  return {
+    isConfiguredDelegate: true,
+    ownerEmail: importOwnerEmail,
+  };
+}
+
 export function selectVerifiedAllowedEmail(
   emailAddresses: ReadonlyArray<{
     id: string;
@@ -64,4 +120,9 @@ export function selectVerifiedAllowedEmail(
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
+}
+
+function explicitOwnerEmail(email: string | null | undefined) {
+  const configured = email?.trim();
+  return configured ? normalizeEmail(configured) : null;
 }

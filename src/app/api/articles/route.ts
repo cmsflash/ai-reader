@@ -16,7 +16,7 @@ export async function GET() {
     return auth.response;
   }
 
-  const articles = await listArticleSummaries(auth.user.email);
+  const articles = await listArticleSummaries(auth.user.ownerEmail);
   return NextResponse.json({ articles });
 }
 
@@ -30,8 +30,8 @@ export async function POST(request: Request) {
   try {
     const contentType = request.headers.get("content-type") ?? "";
     const result = contentType.includes("multipart/form-data")
-      ? await importFromForm(request, auth.user.email)
-      : await importFromJson(request, auth.user.email);
+      ? await importFromForm(request, auth.user.ownerEmail)
+      : await importFromJson(request, auth.user.ownerEmail);
 
     return NextResponse.json(result, { status: 201 });
   } catch (error) {

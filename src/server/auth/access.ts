@@ -6,6 +6,7 @@ import {
   isClerkConfigured,
   isEmailAllowed,
   isIntegrationOwner,
+  resolvePreviewTestOwnerEmail,
   selectVerifiedAllowedEmail,
   shouldBypassAuthLocally,
 } from "@/server/auth/config";
@@ -22,6 +23,7 @@ export type AppAuthStatus = {
 
 export type AppUser = {
   email: string;
+  ownerEmail: string;
   userId?: string;
 };
 
@@ -66,12 +68,16 @@ export async function getAppAuthStatus(): Promise<AppAuthStatus> {
     user.emailAddresses,
     user.primaryEmailAddressId,
   );
+  const previewTestOwner = resolvePreviewTestOwnerEmail(user.id, email);
+  const authorized = previewTestOwner.isConfiguredDelegate
+    ? Boolean(previewTestOwner.ownerEmail)
+    : isEmailAllowed(email);
 
   return {
     enabled: true,
     configured: true,
     authenticated: true,
-    authorized: isEmailAllowed(email),
+    authorized,
     allowlistConfigured,
     email,
     userId: user.id,
@@ -86,10 +92,14 @@ export async function requireAppUser(): Promise<RequireAppUserResult> {
     return { response, user: null };
   }
 
+  const email = normalizeEmail(status.email ?? localDevelopmentOwnerEmail());
+  const previewTestOwner = resolvePreviewTestOwnerEmail(status.userId, email);
+
   return {
     response: null,
     user: {
-      email: normalizeEmail(status.email ?? localDevelopmentOwnerEmail()),
+      email,
+      ownerEmail: previewTestOwner.ownerEmail ?? email,
       userId: status.userId,
     },
   };

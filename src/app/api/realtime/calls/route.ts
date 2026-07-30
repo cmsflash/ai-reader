@@ -48,7 +48,10 @@ export async function POST(request: Request) {
 
   try {
     const call = parseRealtimeDiscussionCallForm(await request.formData());
-    const article = await getSavedArticle(call.articleId, auth.user.email);
+    const article = await getSavedArticle(
+      call.articleId,
+      auth.user.ownerEmail,
+    );
 
     if (!article) {
       return NextResponse.json({ error: "Article not found." }, { status: 404 });

@@ -29,7 +29,7 @@ export async function GET() {
     return auth.response;
   }
 
-  const ownerError = requireIntegrationOwnerResponse(auth.user.email);
+  const ownerError = requireIntegrationOwnerResponse(auth.user.ownerEmail);
 
   if (ownerError) {
     return ownerError;

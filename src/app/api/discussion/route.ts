@@ -37,7 +37,10 @@ export async function POST(request: Request) {
 
   try {
     const discussion = parseDiscussionRequest(await request.json());
-    const article = await getSavedArticle(discussion.articleId, auth.user.email);
+    const article = await getSavedArticle(
+      discussion.articleId,
+      auth.user.ownerEmail,
+    );
 
     if (!article) {
       return NextResponse.json({ error: "Article not found." }, { status: 404 });

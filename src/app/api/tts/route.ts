@@ -34,7 +34,11 @@ export async function POST(request: Request) {
     const costUsd = speech.costUsd ?? 0;
 
     if (body.articleId && costUsd > 0) {
-      await getArticleRepository().addProcessingCost(body.articleId, auth.user.email, costUsd);
+      await getArticleRepository().addProcessingCost(
+        body.articleId,
+        auth.user.ownerEmail,
+        costUsd,
+      );
     }
 
     return new Response(speech.audio, {

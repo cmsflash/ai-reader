@@ -62,6 +62,21 @@ extension or an optional direct iOS Shortcut. Generate a high-entropy value, for
 The browser-opening iOS Shortcut described below uses the signed-in web session and does not need
 the bearer token.
 
+### Preview test identity
+
+A dedicated Clerk test user can be delegated to the existing single-user library for automated
+Preview verification. Set `AI_READER_PREVIEW_TEST_USER_ID` only on the trusted Preview branch, add
+that test user's verified email to the same branch's `AI_READER_ALLOWED_EMAILS`, and keep both
+`AI_READER_IMPORT_OWNER_EMAIL` and `AI_READER_INTEGRATION_OWNER_EMAIL` explicitly set to the same
+allowlisted canonical owner.
+
+The delegation is keyed by Clerk's immutable user ID and activates only when both `VERCEL=1` and
+`VERCEL_ENV=preview`. Production and local development ignore it. Use a Clerk `+clerk_test`
+address and Clerk's fixed test verification code, or the official Clerk testing helper, instead
+of assigning a durable password or saving session cookies. Because Preview uses the canonical
+database and provider credentials, this identity has real access to the owner's library; scope it
+to a trusted branch and remove it when it is no longer needed.
+
 ## Instapaper
 
 1. Sign into the Instapaper account whose library will be imported and

@@ -22,7 +22,7 @@ export async function GET(_request: Request, context: RouteContext) {
   }
 
   const { id } = await context.params;
-  const article = await getSavedArticle(id, auth.user.email);
+  const article = await getSavedArticle(id, auth.user.ownerEmail);
 
   if (!article) {
     return NextResponse.json({ error: "Article not found." }, { status: 404 });
@@ -47,7 +47,11 @@ export async function PATCH(request: Request, context: RouteContext) {
       };
     };
 
-    const result = await updateSavedArticleProgress(id, auth.user.email, body.progress ?? {});
+    const result = await updateSavedArticleProgress(
+      id,
+      auth.user.ownerEmail,
+      body.progress ?? {},
+    );
 
     if (!result) {
       return NextResponse.json({ error: "Article not found." }, { status: 404 });
@@ -72,7 +76,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
   }
 
   const { id } = await context.params;
-  const deleted = await deleteSavedArticle(id, auth.user.email);
+  const deleted = await deleteSavedArticle(id, auth.user.ownerEmail);
 
   if (!deleted) {
     return NextResponse.json({ error: "Article not found." }, { status: 404 });

@@ -20,7 +20,7 @@ export async function POST(request: Request) {
     return auth.response;
   }
 
-  const ownerError = requireIntegrationOwnerResponse(auth.user.email);
+  const ownerError = requireIntegrationOwnerResponse(auth.user.ownerEmail);
 
   if (ownerError) {
     return ownerError;
@@ -52,7 +52,7 @@ export async function POST(request: Request) {
 
   try {
     const result = await syncDropboxAtVoiceArticles({
-      ownerEmail: auth.user.email,
+      ownerEmail: auth.user.ownerEmail,
       batchSize: body.batchSize,
     });
 
