@@ -1,12 +1,12 @@
 "use client";
 
 import {
+  ChevronLeft,
   BookOpen,
   CloudDownload,
   Download,
   FileText,
   Link as LinkIcon,
-  Menu,
   MessageCircle,
   Pause,
   Play,
@@ -17,10 +17,9 @@ import {
   Trash2,
   Upload,
   Volume2,
-  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
   ArticleDiscussion,
   type ArticleDiscussionScope,
@@ -116,6 +115,104 @@ type SelectionDiscussionAction = {
   tooLong: boolean;
 };
 
+type AppView = "library" | "reader" | "settings";
+
+type AppHistoryEntry = {
+  view: AppView;
+  articleId?: string;
+  depth: number;
+};
+
+const historyMetadataStorageKey = "ai-reader:history-metadata";
+
+type HistoryMetadata = {
+  resolvedIds: Array<[string, string | null]>;
+  unavailableIds: string[];
+};
+
+function readHistoryMetadata(): HistoryMetadata {
+  try {
+    const value = JSON.parse(
+      window.sessionStorage.getItem(historyMetadataStorageKey) ?? "{}",
+    ) as Partial<HistoryMetadata>;
+    return {
+      resolvedIds: Array.isArray(value.resolvedIds)
+        ? value.resolvedIds.filter(
+            (entry): entry is [string, string | null] =>
+              Array.isArray(entry) &&
+              typeof entry[0] === "string" &&
+              (typeof entry[1] === "string" || entry[1] === null),
+          )
+        : [],
+      unavailableIds: Array.isArray(value.unavailableIds)
+        ? value.unavailableIds.filter(
+            (entry): entry is string => typeof entry === "string",
+          )
+        : [],
+    };
+  } catch {
+    return { resolvedIds: [], unavailableIds: [] };
+  }
+}
+
+function persistHistoryMetadata(
+  resolvedIds: Map<string, string | null>,
+  unavailableIds: Set<string>,
+) {
+  try {
+    const metadata: HistoryMetadata = {
+      resolvedIds: Array.from(resolvedIds.entries()).slice(-100),
+      unavailableIds: Array.from(unavailableIds).slice(-100),
+    };
+    window.sessionStorage.setItem(
+      historyMetadataStorageKey,
+      JSON.stringify(metadata),
+    );
+  } catch {
+    // History repair is best effort when storage is unavailable.
+  }
+}
+
+function appHistoryEntry(state: unknown): AppHistoryEntry | null {
+  if (!state || typeof state !== "object") {
+    return null;
+  }
+
+  const entry = (state as { aiReader?: unknown }).aiReader;
+
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  const candidate = entry as Partial<AppHistoryEntry>;
+
+  if (
+    !["library", "reader", "settings"].includes(candidate.view ?? "") ||
+    typeof candidate.depth !== "number"
+  ) {
+    return null;
+  }
+
+  if (candidate.view === "reader" && !candidate.articleId) {
+    return null;
+  }
+
+  return candidate as AppHistoryEntry;
+}
+
+function writeAppHistory(mode: "push" | "replace", entry: AppHistoryEntry) {
+  const currentState = window.history.state;
+  const preservedState =
+    currentState && typeof currentState === "object" ? currentState : {};
+  const nextState = { ...preservedState, aiReader: entry };
+
+  if (mode === "push") {
+    window.history.pushState(nextState, "", window.location.href);
+  } else {
+    window.history.replaceState(nextState, "", window.location.href);
+  }
+}
+
 export function ReaderApp() {
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [pendingImports, setPendingImports] = useState<PendingImport[]>([]);
@@ -124,6 +221,8 @@ export function ReaderApp() {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<string | null>("Loading library...");
   const [error, setError] = useState<string | null>(null);
+  const [articleLoadError, setArticleLoadError] = useState<string | null>(null);
+  const [articleLoadAttempt, setArticleLoadAttempt] = useState(0);
   const [isImporting, setIsImporting] = useState(false);
   const [isArticleLoading, setIsArticleLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -146,15 +245,22 @@ export function ReaderApp() {
     useState<ArticleDiscussionScope>(wholeArticleDiscussionScope);
   const [selectionDiscussionAction, setSelectionDiscussionAction] =
     useState<SelectionDiscussionAction | null>(null);
-  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [appView, setAppView] = useState<AppView>("library");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const articleBodyRef = useRef<HTMLElement | null>(null);
-  const libraryPanelRef = useRef<HTMLElement | null>(null);
-  const libraryTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const libraryCloseButtonRef = useRef<HTMLButtonElement | null>(null);
-  const libraryWasOpenRef = useRef(false);
+  const libraryHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const settingsHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const readerBackButtonRef = useRef<HTMLButtonElement | null>(null);
+  const hasMountedRef = useRef(false);
   const articleIdRef = useRef<string | null>(null);
+  const scrollPositionsRef = useRef<Record<AppView, number>>({
+    library: 0,
+    reader: 0,
+    settings: 0,
+  });
+  const resolvedHistoryIdsRef = useRef(new Map<string, string | null>());
+  const unavailableArticleIdsRef = useRef(new Set<string>());
   const sentencesRef = useRef<SentenceSegment[]>([]);
   const speechSessionRef = useRef(0);
   const lastTapRef = useRef<{ index: number; time: number } | null>(null);
@@ -162,6 +268,12 @@ export function ReaderApp() {
   const restoredArticleIdRef = useRef<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const metadata = readHistoryMetadata();
+    resolvedHistoryIdsRef.current = new Map(metadata.resolvedIds);
+    unavailableArticleIdsRef.current = new Set(metadata.unavailableIds);
+  }, []);
 
   const annotated = useMemo(() => {
     if (!article) {
@@ -196,6 +308,52 @@ export function ReaderApp() {
   }, [selectedId]);
 
   useEffect(() => {
+    if (appView === "reader") {
+      restoredArticleIdRef.current = null;
+    }
+  }, [appView, selectedId]);
+
+  useEffect(() => {
+    scrollPositionsRef.current.reader = 0;
+  }, [selectedId]);
+
+  useEffect(() => {
+    const shouldRestoreFocus = hasMountedRef.current;
+    hasMountedRef.current = true;
+
+    if (shouldRestoreFocus) {
+      const savedPosition = scrollPositionsRef.current[appView];
+      window.scrollTo({ top: savedPosition });
+    }
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      if (!shouldRestoreFocus) {
+        return;
+      }
+
+      const target =
+        appView === "library"
+          ? libraryHeadingRef.current
+          : appView === "settings"
+            ? settingsHeadingRef.current
+            : readerBackButtonRef.current;
+      target?.focus({ preventScroll: true });
+    });
+
+    const rememberScrollPosition = () => {
+      scrollPositionsRef.current[appView] = window.scrollY;
+    };
+    window.addEventListener("scroll", rememberScrollPosition, {
+      passive: true,
+    });
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("scroll", rememberScrollPosition);
+    };
+  }, [appView]);
+
+  useEffect(() => {
     setDiscussionOpen(false);
     setDiscussionScope(wholeArticleDiscussionScope);
     setSelectionDiscussionAction(null);
@@ -228,57 +386,6 @@ export function ReaderApp() {
   }, [selectionDiscussionAction]);
 
   useEffect(() => {
-    if (!libraryOpen) {
-      if (libraryWasOpenRef.current) {
-        libraryTriggerRef.current?.focus();
-      }
-      libraryWasOpenRef.current = false;
-      return;
-    }
-
-    libraryWasOpenRef.current = true;
-    const focusFrame = window.requestAnimationFrame(() => {
-      libraryCloseButtonRef.current?.focus();
-    });
-    const handleLibraryKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setLibraryOpen(false);
-        return;
-      }
-
-      if (event.key !== "Tab" || !libraryPanelRef.current) {
-        return;
-      }
-
-      const focusable = Array.from(
-        libraryPanelRef.current.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), input:not([disabled]):not([type="file"]), select:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter((element) => element.getClientRects().length > 0);
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-
-      if (!first || !last) {
-        event.preventDefault();
-      } else if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    window.addEventListener("keydown", handleLibraryKeyDown);
-
-    return () => {
-      window.cancelAnimationFrame(focusFrame);
-      window.removeEventListener("keydown", handleLibraryKeyDown);
-    };
-  }, [libraryOpen]);
-
-  useEffect(() => {
     sentencesRef.current = annotated.sentences;
   }, [annotated.sentences]);
 
@@ -294,7 +401,6 @@ export function ReaderApp() {
     try {
       const data = await requestJson<ArticleListResponse>("/api/articles");
       setArticles(data.articles);
-      setSelectedId((current) => current ?? data.articles[0]?.id ?? null);
       setStatus(null);
       setError(null);
     } catch (loadError) {
@@ -353,13 +459,20 @@ export function ReaderApp() {
   useEffect(() => {
     if (!selectedId) {
       setArticle(null);
+      setArticleLoadError(null);
       return;
     }
 
     if (selectedPendingImport) {
       setArticle(null);
       setIsArticleLoading(false);
-      setError(null);
+      setArticleLoadError(null);
+      return;
+    }
+
+    if (article?.id === selectedId) {
+      setIsArticleLoading(false);
+      setArticleLoadError(null);
       return;
     }
 
@@ -367,6 +480,7 @@ export function ReaderApp() {
 
     async function loadArticle() {
       setIsArticleLoading(true);
+      setArticleLoadError(null);
       try {
         const data = await requestJson<ArticleResponse>(
           `/api/articles/${selectedId}`,
@@ -377,10 +491,10 @@ export function ReaderApp() {
 
         setArticle(data.article);
         setCurrentSentence(data.article.progress.sentenceIndex);
-        setError(null);
+        setArticleLoadError(null);
       } catch (loadError) {
         if (!cancelled) {
-          setError(messageFromError(loadError));
+          setArticleLoadError(messageFromError(loadError));
           setArticle(null);
         }
       } finally {
@@ -395,10 +509,14 @@ export function ReaderApp() {
     return () => {
       cancelled = true;
     };
-  }, [selectedId, selectedPendingImport]);
+  }, [article?.id, articleLoadAttempt, selectedId, selectedPendingImport]);
 
   useEffect(() => {
-    if (!article || restoredArticleIdRef.current === article.id) {
+    if (
+      appView !== "reader" ||
+      !article ||
+      restoredArticleIdRef.current === article.id
+    ) {
       return;
     }
 
@@ -409,7 +527,7 @@ export function ReaderApp() {
       );
       activeSentence?.scrollIntoView({ block: "center", behavior: "instant" });
     });
-  }, [article]);
+  }, [appView, article]);
 
   const saveProgress = useCallback(async (sentenceIndex: number) => {
     const id = articleIdRef.current;
@@ -609,6 +727,164 @@ export function ReaderApp() {
 
   useEffect(() => stopSpeaking, [stopSpeaking]);
 
+  useEffect(() => {
+    const applyEntry = (entry: AppHistoryEntry) => {
+      stopSpeaking();
+      setDiscussionOpen(false);
+      setSelectionDiscussionAction(null);
+      window.getSelection()?.removeAllRanges();
+
+      if (entry.view === "reader" && entry.articleId) {
+        const resolvedId = resolvedHistoryIdsRef.current.get(entry.articleId);
+        const articleId = resolvedId ?? entry.articleId;
+
+        if (
+          resolvedId === null ||
+          unavailableArticleIdsRef.current.has(articleId)
+        ) {
+          articleIdRef.current = null;
+          writeAppHistory("replace", { view: "library", depth: 0 });
+          setAppView("library");
+          return;
+        }
+
+        if (articleId !== entry.articleId) {
+          writeAppHistory("replace", { ...entry, articleId });
+        }
+
+        articleIdRef.current = articleId;
+        setArticleLoadError(null);
+        setArticleLoadAttempt((current) => current + 1);
+        setSelectedId(articleId);
+        setArticle((current) => (current?.id === articleId ? current : null));
+      } else {
+        articleIdRef.current = null;
+      }
+
+      setAppView(entry.view);
+    };
+
+    const initialEntry = appHistoryEntry(window.history.state);
+
+    if (initialEntry) {
+      applyEntry(initialEntry);
+    } else {
+      writeAppHistory("replace", { view: "library", depth: 0 });
+    }
+
+    const handlePopState = (event: PopStateEvent) => {
+      const entry = appHistoryEntry(event.state) ?? {
+        view: "library" as const,
+        depth: 0,
+      };
+      applyEntry(entry);
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [stopSpeaking]);
+
+  const showLibrary = useCallback(() => {
+    stopSpeaking();
+    setDiscussionOpen(false);
+    setSelectionDiscussionAction(null);
+    window.getSelection()?.removeAllRanges();
+    articleIdRef.current = null;
+    const currentEntry = appHistoryEntry(window.history.state);
+
+    if (currentEntry && currentEntry.depth > 0) {
+      window.history.back();
+    } else {
+      writeAppHistory("replace", { view: "library", depth: 0 });
+      setAppView("library");
+    }
+  }, [stopSpeaking]);
+
+  const replaceWithLibrary = useCallback(() => {
+    stopSpeaking();
+    setDiscussionOpen(false);
+    setSelectionDiscussionAction(null);
+    window.getSelection()?.removeAllRanges();
+    articleIdRef.current = null;
+    writeAppHistory("replace", { view: "library", depth: 0 });
+    setAppView("library");
+  }, [stopSpeaking]);
+
+  const showSettings = useCallback(() => {
+    stopSpeaking();
+    setSelectionDiscussionAction(null);
+    articleIdRef.current = null;
+    const currentDepth = appHistoryEntry(window.history.state)?.depth ?? 0;
+    writeAppHistory("push", {
+      view: "settings",
+      depth: currentDepth + 1,
+    });
+    setAppView("settings");
+  }, [stopSpeaking]);
+
+  const showReader = useCallback((articleId: string) => {
+    setError(null);
+    setArticleLoadError(null);
+    setArticleLoadAttempt((current) => current + 1);
+    const currentDepth = appHistoryEntry(window.history.state)?.depth ?? 0;
+    writeAppHistory("push", {
+      view: "reader",
+      articleId,
+      depth: currentDepth + 1,
+    });
+    setSelectedId(articleId);
+    setArticle((current) => (current?.id === articleId ? current : null));
+    setAppView("reader");
+  }, []);
+
+  const handleLibraryItemSelect = useCallback(
+    (event: ReactMouseEvent<HTMLElement>) => {
+      const target = event.target;
+
+      if (!(target instanceof Element)) {
+        return;
+      }
+
+      const row = target.closest<HTMLButtonElement>("[data-article-id]");
+
+      if (!row || !event.currentTarget.contains(row)) {
+        return;
+      }
+
+      const articleId = row.dataset.articleId;
+
+      if (!articleId) {
+        return;
+      }
+
+      articleIdRef.current = articleId;
+      showReader(articleId);
+    },
+    [showReader],
+  );
+
+  useEffect(() => {
+    if (appView === "library" || discussionOpen) {
+      return;
+    }
+
+    const returnToLibrary = (event: KeyboardEvent) => {
+      if (
+        event.key === "Escape" &&
+        !event.defaultPrevented &&
+        !(event.target instanceof HTMLInputElement) &&
+        !(event.target instanceof HTMLTextAreaElement) &&
+        !(event.target instanceof HTMLSelectElement)
+      ) {
+        event.preventDefault();
+        showLibrary();
+      }
+    };
+
+    window.addEventListener("keydown", returnToLibrary);
+    return () => window.removeEventListener("keydown", returnToLibrary);
+  }, [appView, discussionOpen, showLibrary]);
+
   const resumeFromSentence = useCallback(
     (sentenceIndex: number) => {
       setCurrentSentence(sentenceIndex);
@@ -735,7 +1011,15 @@ export function ReaderApp() {
     setIsImporting(true);
     const pendingImport = pendingImportFromUrl(url.trim());
     setPendingImports((current) => [pendingImport, ...current]);
+    articleIdRef.current = pendingImport.id;
+    const currentDepth = appHistoryEntry(window.history.state)?.depth ?? 0;
+    writeAppHistory("push", {
+      view: "reader",
+      articleId: pendingImport.id,
+      depth: currentDepth + 1,
+    });
     setSelectedId(pendingImport.id);
+    setAppView("reader");
     setArticle(null);
     setStatus("Parsing URL...");
     setError(null);
@@ -756,17 +1040,39 @@ export function ReaderApp() {
         data.summary,
         ...current.filter((item) => item.id !== data.summary.id),
       ]);
-      setSelectedId(data.article.id);
-      setArticle(data.article);
+      resolvedHistoryIdsRef.current.set(pendingImport.id, data.article.id);
+      persistHistoryMetadata(
+        resolvedHistoryIdsRef.current,
+        unavailableArticleIdsRef.current,
+      );
+      if (articleIdRef.current === pendingImport.id) {
+        const pendingEntry = appHistoryEntry(window.history.state);
+        writeAppHistory("replace", {
+          view: "reader",
+          articleId: data.article.id,
+          depth: pendingEntry?.depth ?? 1,
+        });
+        articleIdRef.current = data.article.id;
+        setSelectedId(data.article.id);
+        setArticle(data.article);
+      }
       setUrl("");
       setStatus(null);
     } catch (submitError) {
+      resolvedHistoryIdsRef.current.set(pendingImport.id, null);
+      persistHistoryMetadata(
+        resolvedHistoryIdsRef.current,
+        unavailableArticleIdsRef.current,
+      );
       setPendingImports((current) =>
         current.filter((item) => item.id !== pendingImport.id),
       );
-      setSelectedId((current) =>
-        current === pendingImport.id ? (articles[0]?.id ?? null) : current,
-      );
+      if (articleIdRef.current === pendingImport.id) {
+        articleIdRef.current = null;
+        setSelectedId(null);
+        setArticle(null);
+        replaceWithLibrary();
+      }
       setError(messageFromError(submitError));
       setStatus(null);
     } finally {
@@ -784,7 +1090,15 @@ export function ReaderApp() {
     const pendingImport = pendingImportFromFile(file);
     setIsImporting(true);
     setPendingImports((current) => [pendingImport, ...current]);
+    articleIdRef.current = pendingImport.id;
+    const currentDepth = appHistoryEntry(window.history.state)?.depth ?? 0;
+    writeAppHistory("push", {
+      view: "reader",
+      articleId: pendingImport.id,
+      depth: currentDepth + 1,
+    });
     setSelectedId(pendingImport.id);
+    setAppView("reader");
     setArticle(null);
     setStatus(`Parsing ${file.name}...`);
     setError(null);
@@ -802,16 +1116,38 @@ export function ReaderApp() {
         data.summary,
         ...current.filter((item) => item.id !== data.summary.id),
       ]);
-      setSelectedId(data.article.id);
-      setArticle(data.article);
+      resolvedHistoryIdsRef.current.set(pendingImport.id, data.article.id);
+      persistHistoryMetadata(
+        resolvedHistoryIdsRef.current,
+        unavailableArticleIdsRef.current,
+      );
+      if (articleIdRef.current === pendingImport.id) {
+        const pendingEntry = appHistoryEntry(window.history.state);
+        writeAppHistory("replace", {
+          view: "reader",
+          articleId: data.article.id,
+          depth: pendingEntry?.depth ?? 1,
+        });
+        articleIdRef.current = data.article.id;
+        setSelectedId(data.article.id);
+        setArticle(data.article);
+      }
       setStatus(null);
     } catch (uploadError) {
+      resolvedHistoryIdsRef.current.set(pendingImport.id, null);
+      persistHistoryMetadata(
+        resolvedHistoryIdsRef.current,
+        unavailableArticleIdsRef.current,
+      );
       setPendingImports((current) =>
         current.filter((item) => item.id !== pendingImport.id),
       );
-      setSelectedId((current) =>
-        current === pendingImport.id ? (articles[0]?.id ?? null) : current,
-      );
+      if (articleIdRef.current === pendingImport.id) {
+        articleIdRef.current = null;
+        setSelectedId(null);
+        setArticle(null);
+        replaceWithLibrary();
+      }
       setError(messageFromError(uploadError));
       setStatus(null);
     } finally {
@@ -871,20 +1207,33 @@ export function ReaderApp() {
       return;
     }
 
+    const deletingId = selectedId;
     stopSpeaking();
     setError(null);
 
     try {
-      await requestJson<{ ok: boolean }>(`/api/articles/${selectedId}`, {
+      await requestJson<{ ok: boolean }>(`/api/articles/${deletingId}`, {
         method: "DELETE",
       });
 
-      const remaining = articles.filter((item) => item.id !== selectedId);
-      setArticles(remaining);
-      setSelectedId(remaining[0]?.id ?? null);
-      setArticle(null);
+      unavailableArticleIdsRef.current.add(deletingId);
+      persistHistoryMetadata(
+        resolvedHistoryIdsRef.current,
+        unavailableArticleIdsRef.current,
+      );
+      setArticles((current) =>
+        current.filter((item) => item.id !== deletingId),
+      );
+      if (articleIdRef.current === deletingId) {
+        articleIdRef.current = null;
+        setSelectedId(null);
+        setArticle(null);
+        replaceWithLibrary();
+      }
     } catch (deleteError) {
-      setError(messageFromError(deleteError));
+      if (articleIdRef.current === deletingId) {
+        setError(messageFromError(deleteError));
+      }
     }
   }
 
@@ -913,23 +1262,22 @@ export function ReaderApp() {
   const instapaperFolders = integrationFolderOptions(instapaperStatus?.folders);
 
   return (
-    <main className="reader-app">
-      <aside
-        ref={libraryPanelRef}
-        className={`library-panel ${libraryOpen ? "mobile-open" : ""}`}
-        id="reader-library"
-        aria-label="Library"
-      >
-        <div className="library-utilities">
-          <header className="brand-row">
-            <div className="brand-mark" aria-hidden="true">
-              <BookOpen size={20} />
+    <main className={`reader-app view-${appView}`}>
+      {appView === "library" ? (
+        <section className="library-panel app-surface" aria-label="Library">
+          <header className="app-bar library-app-bar">
+            <div className="brand-identity">
+              <div className="brand-mark" aria-hidden="true">
+                <BookOpen size={20} />
+              </div>
+              <div>
+                <h1>AI Reader</h1>
+                <p>
+                  {libraryCountLabel(articles.length, pendingImports.length)}
+                </p>
+              </div>
             </div>
-            <div>
-              <h1>AI Reader</h1>
-              <p>Read, listen, discuss</p>
-            </div>
-            <div className="brand-actions">
+            <div className="app-bar-actions">
               <button
                 className="icon-button"
                 type="button"
@@ -939,336 +1287,376 @@ export function ReaderApp() {
               >
                 <RefreshCw size={18} />
               </button>
+              <button
+                className="header-text-button"
+                type="button"
+                aria-label="Settings"
+                onClick={showSettings}
+              >
+                <Settings2 size={18} />
+                <span>Settings</span>
+              </button>
               {authStatus?.enabled ? (
                 <AuthSignOutButton onBeforeSignOut={stopSpeaking} />
               ) : null}
-              <button
-                ref={libraryCloseButtonRef}
-                className="icon-button mobile-library-close"
-                type="button"
-                title="Close library"
-                aria-label="Close library"
-                onClick={() => setLibraryOpen(false)}
-              >
-                <X size={19} />
-              </button>
             </div>
           </header>
 
-          <form className="import-form" onSubmit={handleUrlSubmit}>
-            <label className="url-field">
-              <LinkIcon size={18} />
+          <div className="library-page">
+            <header className="library-index-header">
+              <div>
+                <span className="library-eyebrow">Read later</span>
+                <h2
+                  ref={libraryHeadingRef}
+                  id="library-index-title"
+                  tabIndex={-1}
+                >
+                  Library
+                </h2>
+              </div>
+              <span>
+                {libraryCountLabel(articles.length, pendingImports.length)}
+              </span>
+            </header>
+
+            <section className="library-add-panel" aria-label="Add to library">
+              <form className="import-form" onSubmit={handleUrlSubmit}>
+                <label className="url-field">
+                  <LinkIcon size={18} />
+                  <span className="visually-hidden">Article URL</span>
+                  <input
+                    value={url}
+                    onChange={(event) => setUrl(event.target.value)}
+                    placeholder="Paste an article URL"
+                    type="url"
+                    disabled={isImporting}
+                  />
+                </label>
+                <button
+                  className="primary-button"
+                  type="submit"
+                  disabled={isImporting || !url.trim()}
+                >
+                  <Plus size={18} />
+                  Save
+                </button>
+              </form>
+
               <input
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                placeholder="https://example.com/article"
-                type="url"
-                disabled={isImporting}
+                ref={fileInputRef}
+                className="visually-hidden"
+                type="file"
+                aria-hidden="true"
+                tabIndex={-1}
+                accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm,.mhtml,.mht,.mhtml.zip,.url,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain,text/html,application/xhtml+xml,message/rfc822,application/x-mimearchive,application/zip,application/internet-shortcut"
+                onChange={(event) =>
+                  void handleFileUpload(event.target.files?.[0])
+                }
               />
-            </label>
-            <button
-              className="primary-button"
-              type="submit"
-              disabled={isImporting || !url.trim()}
-            >
-              <Plus size={18} />
-              Save URL
-            </button>
-          </form>
-
-          <input
-            ref={fileInputRef}
-            className="visually-hidden"
-            type="file"
-            accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm,.mhtml,.mht,.mhtml.zip,.url,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain,text/html,application/xhtml+xml,message/rfc822,application/x-mimearchive,application/zip,application/internet-shortcut"
-            onChange={(event) => void handleFileUpload(event.target.files?.[0])}
-          />
-
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={isImporting}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <Upload size={18} />
-            Upload document
-          </button>
-
-          <details className="settings-panel integrations-panel">
-            <summary>
-              <CloudDownload size={17} />
-              Imports &amp; sharing
-            </summary>
-
-            <div className="integration-stack">
-              <section
-                className="integration-card"
-                aria-labelledby="instapaper-integration-title"
+              <button
+                className="secondary-button upload-library-button"
+                type="button"
+                disabled={isImporting}
+                onClick={() => fileInputRef.current?.click()}
               >
-                <div className="integration-card-header">
-                  <div>
-                    <h3 id="instapaper-integration-title">Instapaper</h3>
-                    <p>
-                      {integrationProviderLabel(
+                <Upload size={17} />
+                Upload document
+              </button>
+            </section>
+
+            {(status || error) && (
+              <div className={error ? "notice error" : "notice"} role="status">
+                {error ?? status}
+              </div>
+            )}
+
+            <nav
+              className="article-list"
+              aria-labelledby="library-index-title"
+              onClick={handleLibraryItemSelect}
+            >
+              {libraryItems.length === 0 ? (
+                <div className="empty-library">
+                  <FileText size={24} />
+                  <span>Save a URL or upload a document.</span>
+                </div>
+              ) : (
+                libraryItems.map((item) =>
+                  item.kind === "pending" ? (
+                    <PendingImportRow
+                      key={item.pendingImport.id}
+                      pendingImport={item.pendingImport}
+                      selected={item.pendingImport.id === selectedId}
+                    />
+                  ) : (
+                    <ArticleRow
+                      key={item.articleSummary.id}
+                      item={item.articleSummary}
+                      selected={item.articleSummary.id === selectedId}
+                    />
+                  ),
+                )
+              )}
+            </nav>
+          </div>
+        </section>
+      ) : null}
+
+      {appView === "settings" ? (
+        <section
+          className="settings-view app-surface"
+          aria-labelledby="settings-view-title"
+        >
+          <header className="app-bar settings-app-bar">
+            <button className="back-button" type="button" onClick={showLibrary}>
+              <ChevronLeft size={20} />
+              <span>Library</span>
+            </button>
+            <div className="view-heading">
+              <span>AI Reader</span>
+              <h1
+                ref={settingsHeadingRef}
+                id="settings-view-title"
+                tabIndex={-1}
+              >
+                Settings
+              </h1>
+            </div>
+            <span className="app-bar-spacer" aria-hidden="true" />
+          </header>
+
+          <div className="settings-page">
+            <section
+              className="settings-section"
+              aria-labelledby="imports-settings-title"
+            >
+              <div className="settings-section-heading">
+                <CloudDownload size={19} />
+                <div>
+                  <h2 id="imports-settings-title">Imports &amp; sharing</h2>
+                  <p>Bring saved reading into one library.</p>
+                </div>
+              </div>
+
+              <div className="integration-stack">
+                <section
+                  className="integration-card"
+                  aria-labelledby="instapaper-integration-title"
+                >
+                  <div className="integration-card-header">
+                    <div>
+                      <h3 id="instapaper-integration-title">Instapaper</h3>
+                      <p>
+                        {integrationProviderLabel(
+                          instapaperStatus,
+                          integrationStatusError,
+                        )}
+                      </p>
+                    </div>
+                    <span
+                      className={
+                        instapaperReady
+                          ? "integration-badge ready"
+                          : "integration-badge"
+                      }
+                    >
+                      {integrationProviderBadgeLabel(
                         instapaperStatus,
                         integrationStatusError,
                       )}
-                    </p>
+                    </span>
                   </div>
-                  <span
-                    className={
-                      instapaperReady
-                        ? "integration-badge ready"
-                        : "integration-badge"
-                    }
-                  >
-                    {integrationProviderBadgeLabel(
-                      instapaperStatus,
-                      integrationStatusError,
-                    )}
-                  </span>
-                </div>
-
-                <div className="integration-controls">
-                  <label>
-                    Folder
-                    <select
-                      value={instapaperFolder}
+                  <div className="integration-controls">
+                    <label>
+                      Folder
+                      <select
+                        value={instapaperFolder}
+                        disabled={
+                          !instapaperReady || syncingIntegration !== null
+                        }
+                        onChange={(event) =>
+                          setInstapaperFolder(event.target.value)
+                        }
+                      >
+                        {instapaperFolders.map((folder) => (
+                          <option key={folder.id} value={folder.id}>
+                            {folder.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      className="integration-sync-button"
+                      type="button"
                       disabled={!instapaperReady || syncingIntegration !== null}
-                      onChange={(event) =>
-                        setInstapaperFolder(event.target.value)
+                      onClick={() => void handleIntegrationSync("instapaper")}
+                    >
+                      <RefreshCw
+                        className={
+                          syncingIntegration === "instapaper"
+                            ? "spin"
+                            : undefined
+                        }
+                        size={15}
+                      />
+                      Sync
+                    </button>
+                  </div>
+                </section>
+
+                <section
+                  className="integration-card"
+                  aria-labelledby="dropbox-integration-title"
+                >
+                  <div className="integration-card-header">
+                    <div>
+                      <h3 id="dropbox-integration-title">@Voice Reader</h3>
+                      <p>
+                        {integrationProviderLabel(
+                          dropboxStatus,
+                          integrationStatusError,
+                        )}
+                      </p>
+                    </div>
+                    <span
+                      className={
+                        dropboxReady
+                          ? "integration-badge ready"
+                          : "integration-badge"
                       }
                     >
-                      {instapaperFolders.map((folder) => (
-                        <option key={folder.id} value={folder.id}>
-                          {folder.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <button
-                    className="integration-sync-button"
-                    type="button"
-                    disabled={!instapaperReady || syncingIntegration !== null}
-                    onClick={() => void handleIntegrationSync("instapaper")}
-                  >
-                    <RefreshCw
-                      className={
-                        syncingIntegration === "instapaper" ? "spin" : undefined
-                      }
-                      size={15}
-                    />
-                    Sync
-                  </button>
-                </div>
-              </section>
-
-              <section
-                className="integration-card"
-                aria-labelledby="dropbox-integration-title"
-              >
-                <div className="integration-card-header">
-                  <div>
-                    <h3 id="dropbox-integration-title">@Voice Reader</h3>
-                    <p>
-                      {integrationProviderLabel(
+                      {integrationProviderBadgeLabel(
                         dropboxStatus,
                         integrationStatusError,
                       )}
-                    </p>
+                    </span>
                   </div>
-                  <span
+                  <div className="integration-dropbox-row">
+                    <span>{dropboxStatus?.folder || "/Apps/@Voice"}</span>
+                    <button
+                      className="integration-sync-button"
+                      type="button"
+                      disabled={!dropboxReady || syncingIntegration !== null}
+                      onClick={() => void handleIntegrationSync("dropbox")}
+                    >
+                      <RefreshCw
+                        className={
+                          syncingIntegration === "dropbox" ? "spin" : undefined
+                        }
+                        size={15}
+                      />
+                      Sync
+                    </button>
+                  </div>
+                </section>
+
+                <section
+                  className="integration-help"
+                  aria-labelledby="share-import-title"
+                >
+                  <div className="integration-help-title">
+                    <Share2 size={16} />
+                    <h3 id="share-import-title">Quick save</h3>
+                  </div>
+                  <p>
+                    Install AI Reader on Android to add it to the Share sheet.
+                    On iPhone or iPad, use the AI Reader Share Sheet shortcut.
+                  </p>
+                  <a
+                    className="integration-download-link"
+                    href="/ai-reader-chrome-extension.zip"
+                    download
+                  >
+                    <Download size={15} />
+                    Download Chrome extension
+                  </a>
+                </section>
+
+                {(integrationNotice || integrationStatusError) && (
+                  <p
                     className={
-                      dropboxReady
-                        ? "integration-badge ready"
-                        : "integration-badge"
+                      !integrationNotice && integrationStatusError
+                        ? "integration-message error"
+                        : "integration-message"
                     }
+                    role="status"
                   >
-                    {integrationProviderBadgeLabel(
-                      dropboxStatus,
-                      integrationStatusError,
-                    )}
-                  </span>
-                </div>
-
-                <div className="integration-dropbox-row">
-                  <span>{dropboxStatus?.folder || "/Apps/@Voice"}</span>
-                  <button
-                    className="integration-sync-button"
-                    type="button"
-                    disabled={!dropboxReady || syncingIntegration !== null}
-                    onClick={() => void handleIntegrationSync("dropbox")}
-                  >
-                    <RefreshCw
-                      className={
-                        syncingIntegration === "dropbox" ? "spin" : undefined
-                      }
-                      size={15}
-                    />
-                    Sync
-                  </button>
-                </div>
-              </section>
-
-              <section
-                className="integration-help"
-                aria-labelledby="share-import-title"
-              >
-                <div className="integration-help-title">
-                  <Share2 size={16} />
-                  <h3 id="share-import-title">Quick save</h3>
-                </div>
-                <p>
-                  Install AI Reader on Android to add it to the Share sheet. On
-                  iPhone or iPad, use the AI Reader Share Sheet shortcut.
-                </p>
-                <a
-                  className="integration-download-link"
-                  href="/ai-reader-chrome-extension.zip"
-                  download
-                >
-                  <Download size={15} />
-                  Download Chrome extension
-                </a>
-              </section>
-
-              {(integrationNotice || integrationStatusError) && (
-                <p
-                  className={
-                    !integrationNotice && integrationStatusError
-                      ? "integration-message error"
-                      : "integration-message"
-                  }
-                  role="status"
-                >
-                  {integrationNotice ??
-                    `Integration status unavailable: ${integrationStatusError}`}
-                </p>
-              )}
-            </div>
-          </details>
-
-          <details className="settings-panel">
-            <summary>
-              <Settings2 size={17} />
-              TTS
-            </summary>
-            <label>
-              Voice speed
-              <input
-                min="0.7"
-                max="1.4"
-                step="0.05"
-                type="range"
-                value={rate}
-                onChange={(event) => setRate(Number(event.target.value))}
-              />
-            </label>
-          </details>
-
-          {(status || error) && (
-            <div className={error ? "notice error" : "notice"} role="status">
-              {error ?? status}
-            </div>
-          )}
-        </div>
-
-        <section
-          className="library-index"
-          aria-labelledby="library-index-title"
-        >
-          <header className="library-index-header">
-            <div>
-              <span className="library-eyebrow">Saved reads</span>
-              <h2 id="library-index-title">Library</h2>
-            </div>
-            <span>
-              {libraryCountLabel(articles.length, pendingImports.length)}
-            </span>
-          </header>
-
-          <nav className="article-list" aria-label="Saved articles">
-            {libraryItems.length === 0 ? (
-              <div className="empty-library">
-                <FileText size={22} />
-                <span>Save a URL or upload a document.</span>
+                    {integrationNotice ??
+                      `Integration status unavailable: ${integrationStatusError}`}
+                  </p>
+                )}
               </div>
-            ) : (
-              libraryItems.map((item) =>
-                item.kind === "pending" ? (
-                  <PendingImportRow
-                    key={item.pendingImport.id}
-                    pendingImport={item.pendingImport}
-                    selected={item.pendingImport.id === selectedId}
-                    onSelect={() => {
-                      stopSpeaking();
-                      setSelectedId(item.pendingImport.id);
-                      setLibraryOpen(false);
-                    }}
-                  />
-                ) : (
-                  <ArticleRow
-                    key={item.articleSummary.id}
-                    item={item.articleSummary}
-                    selected={item.articleSummary.id === selectedId}
-                    onSelect={() => {
-                      stopSpeaking();
-                      setSelectedId(item.articleSummary.id);
-                      setLibraryOpen(false);
-                    }}
-                  />
-                ),
-              )
-            )}
-          </nav>
+            </section>
+
+            <section
+              className="settings-section"
+              aria-labelledby="tts-settings-title"
+            >
+              <div className="settings-section-heading">
+                <Volume2 size={19} />
+                <div>
+                  <h2 id="tts-settings-title">Read aloud</h2>
+                  <p>Set the default playback speed.</p>
+                </div>
+              </div>
+              <label className="settings-rate-row">
+                <span>Voice speed</span>
+                <input
+                  min="0.7"
+                  max="1.4"
+                  step="0.05"
+                  type="range"
+                  value={rate}
+                  onChange={(event) => setRate(Number(event.target.value))}
+                />
+                <output>{rate.toFixed(2)}×</output>
+              </label>
+            </section>
+
+            <section
+              className="settings-section appearance-summary"
+              aria-labelledby="appearance-settings-title"
+            >
+              <div className="settings-section-heading">
+                <Settings2 size={19} />
+                <div>
+                  <h2 id="appearance-settings-title">Appearance</h2>
+                  <p>
+                    Sepia paper in light mode and true black in dark mode,
+                    following your device.
+                  </p>
+                </div>
+              </div>
+            </section>
+          </div>
         </section>
-      </aside>
-
-      <button
-        ref={libraryTriggerRef}
-        className="mobile-library-trigger"
-        type="button"
-        aria-controls="reader-library"
-        aria-expanded={libraryOpen}
-        aria-label="Open library"
-        onClick={() => setLibraryOpen(true)}
-      >
-        <Menu size={20} />
-        <span>Library</span>
-      </button>
-
-      {libraryOpen ? (
-        <button
-          className="library-scrim"
-          type="button"
-          aria-label="Close library"
-          onClick={() => setLibraryOpen(false)}
-        />
       ) : null}
 
-      <section className="reader-panel" aria-label="Reader">
-        {!selectedId ? (
-          <div className="reader-empty">
-            <BookOpen size={36} />
-            <p>Library is empty.</p>
-          </div>
-        ) : selectedPendingImport ? (
-          <ParsingReader pendingImport={selectedPendingImport} />
-        ) : isArticleLoading || !article ? (
-          <div className="reader-empty">
-            <RefreshCw className="spin" size={32} />
-            <p>Loading article...</p>
-          </div>
-        ) : (
-          <>
-            <header className="reader-toolbar">
-              <div className="reader-toolbar-context">
+      {appView === "reader" ? (
+        <section className="reader-panel app-surface" aria-label="Reader">
+          <header className="reader-toolbar">
+            <button
+              ref={readerBackButtonRef}
+              className="back-button reader-back-button"
+              type="button"
+              aria-label="Back to library"
+              onClick={showLibrary}
+            >
+              <ChevronLeft size={20} />
+              <span>Library</span>
+            </button>
+            <div className="reader-toolbar-context">
+              {article ? (
                 <span className="source-pill">
                   {sourceLabel(article.sourceType)}
                 </span>
-                <span className="reader-toolbar-title">{article.title}</span>
-              </div>
+              ) : null}
+              <span className="reader-toolbar-title">
+                {selectedPendingImport?.title ?? article?.title ?? "Reader"}
+              </span>
+            </div>
 
+            {article && !isArticleLoading ? (
               <div className="reader-actions">
                 <button
                   className="secondary-button discuss-article-button"
@@ -1317,78 +1705,131 @@ export function ReaderApp() {
                   <Trash2 size={19} />
                 </button>
               </div>
-            </header>
+            ) : null}
+          </header>
 
-            <div
-              className="progress-strip"
-              role="progressbar"
-              aria-label="Reading progress"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(readableProgress * 100)}
-            >
-              <span style={{ width: `${readableProgress * 100}%` }} />
+          {(articleLoadError ?? error) ? (
+            <div className="reader-inline-notice error" role="status">
+              {articleLoadError ?? error}
             </div>
+          ) : null}
 
-            <div className="reader-scroll">
-              <article
-                ref={articleBodyRef}
-                className="article-body"
-                onPointerUp={captureArticleSelection}
-                onKeyUp={captureArticleSelection}
+          {!selectedId ? (
+            <div className="reader-empty">
+              <BookOpen size={36} />
+              <p>Choose an article from your library.</p>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={showLibrary}
               >
-                <header className="article-document-header">
-                  <div className="article-source-line">
-                    <span>{sourceLabel(article.sourceType)}</span>
-                    {article.sourceUrl ? (
-                      <a
-                        href={article.sourceUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {sourceDomain(article.sourceUrl)}
-                      </a>
-                    ) : null}
-                  </div>
-                  <h1>
-                    {leadingTitleBlock ? (
-                      <SentenceChunks
-                        chunks={leadingTitleBlock.chunks}
-                        currentSentence={currentSentence}
-                        onSentenceTap={handleSentenceTap}
-                      />
-                    ) : (
-                      article.title
-                    )}
-                  </h1>
-                  <div
-                    className="article-meta-row"
-                    aria-label="Article metadata"
-                  >
-                    <span>{article.wordCount.toLocaleString()} words</span>
-                    <span>{article.estimatedMinutes} min audio</span>
-                    <span>{formatDate(article.createdAt)}</span>
-                    <span>
-                      {formatCost(article.processingCostUsd ?? 0)} API cost
-                    </span>
-                  </div>
-                </header>
-
-                {visibleArticleBlocks.map((block) => (
-                  <ArticleBlockView
-                    key={block.id}
-                    block={block}
-                    articleSourceUrl={article.sourceUrl}
-                    currentSentence={currentSentence}
-                    onSentenceTap={handleSentenceTap}
-                  />
-                ))}
-              </article>
+                Open library
+              </button>
             </div>
-          </>
-        )}
-      </section>
-      {selectionDiscussionAction && !discussionOpen ? (
+          ) : selectedPendingImport ? (
+            <ParsingReader pendingImport={selectedPendingImport} />
+          ) : articleLoadError && !isArticleLoading && !article ? (
+            <div className="reader-empty">
+              <BookOpen size={36} />
+              <p>Couldn&apos;t open this article.</p>
+              <div className="reader-empty-actions">
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() =>
+                    setArticleLoadAttempt((current) => current + 1)
+                  }
+                >
+                  Try again
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={showLibrary}
+                >
+                  Back to library
+                </button>
+              </div>
+            </div>
+          ) : isArticleLoading || !article ? (
+            <div className="reader-empty">
+              <RefreshCw className="spin" size={32} />
+              <p>Loading article...</p>
+            </div>
+          ) : (
+            <>
+              <div
+                className="progress-strip"
+                role="progressbar"
+                aria-label="Reading progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(readableProgress * 100)}
+              >
+                <span style={{ width: `${readableProgress * 100}%` }} />
+              </div>
+
+              <div className="reader-scroll">
+                <article
+                  ref={articleBodyRef}
+                  className="article-body"
+                  onPointerUp={captureArticleSelection}
+                  onKeyUp={captureArticleSelection}
+                >
+                  <header className="article-document-header">
+                    <div className="article-source-line">
+                      <span>{sourceLabel(article.sourceType)}</span>
+                      {article.sourceUrl ? (
+                        <a
+                          href={article.sourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {sourceDomain(article.sourceUrl)}
+                        </a>
+                      ) : null}
+                    </div>
+                    <h1>
+                      {leadingTitleBlock ? (
+                        <SentenceChunks
+                          chunks={leadingTitleBlock.chunks}
+                          currentSentence={currentSentence}
+                          onSentenceTap={handleSentenceTap}
+                        />
+                      ) : (
+                        article.title
+                      )}
+                    </h1>
+                    <div
+                      className="article-meta-row"
+                      aria-label="Article metadata"
+                    >
+                      <span>{article.wordCount.toLocaleString()} words</span>
+                      <span>{article.estimatedMinutes} min audio</span>
+                      <span>{formatDate(article.createdAt)}</span>
+                      <span>
+                        {formatCost(article.processingCostUsd ?? 0)} API cost
+                      </span>
+                    </div>
+                  </header>
+
+                  {visibleArticleBlocks.map((block) => (
+                    <ArticleBlockView
+                      key={block.id}
+                      block={block}
+                      articleSourceUrl={article.sourceUrl}
+                      currentSentence={currentSentence}
+                      onSentenceTap={handleSentenceTap}
+                    />
+                  ))}
+                </article>
+              </div>
+            </>
+          )}
+        </section>
+      ) : null}
+
+      {appView === "reader" && selectionDiscussionAction && !discussionOpen ? (
         <button
           className="selection-discuss-button"
           type="button"
@@ -1429,17 +1870,15 @@ export function ReaderApp() {
 function ArticleRow({
   item,
   selected,
-  onSelect,
 }: {
   item: ArticleSummary;
   selected: boolean;
-  onSelect: () => void;
 }) {
   return (
     <button
       type="button"
       className={`article-row ${selected ? "selected" : ""}`}
-      onClick={onSelect}
+      data-article-id={item.id}
     >
       <span className="source-icon" aria-hidden="true">
         {sourceGlyph(item.sourceType)}
@@ -1466,17 +1905,15 @@ function ArticleRow({
 function PendingImportRow({
   pendingImport,
   selected,
-  onSelect,
 }: {
   pendingImport: PendingImport;
   selected: boolean;
-  onSelect: () => void;
 }) {
   return (
     <button
       type="button"
       className={`article-row pending ${selected ? "selected" : ""}`}
-      onClick={onSelect}
+      data-article-id={pendingImport.id}
       aria-busy="true"
     >
       <span className="source-icon pending" aria-hidden="true">
@@ -1519,9 +1956,7 @@ function ArticleBlockView({
 }) {
   if (block.type === "heading") {
     const HeadingTag = `h${Math.min(Math.max(block.level, 2), 4)}` as
-      | "h2"
-      | "h3"
-      | "h4";
+      "h2" | "h3" | "h4";
     return (
       <HeadingTag>
         <SentenceChunks

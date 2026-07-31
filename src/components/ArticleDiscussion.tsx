@@ -9,13 +9,7 @@ import {
   Square,
   X,
 } from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
 export type ArticleDiscussionScope =
@@ -47,12 +41,7 @@ type DiscussionResponse = {
 };
 
 type VoiceState =
-  | "idle"
-  | "connecting"
-  | "listening"
-  | "thinking"
-  | "speaking"
-  | "error";
+  "idle" | "connecting" | "listening" | "thinking" | "speaking" | "error";
 
 type ArticleDiscussionProps = {
   articleId: string;
@@ -137,7 +126,7 @@ export function ArticleDiscussion({
         : null;
     const background = Array.from(
       document.querySelectorAll<HTMLElement>(
-        ".library-panel, .reader-panel, .mobile-library-trigger, .library-scrim, .selection-discuss-button",
+        ".app-surface, .selection-discuss-button",
       ),
     );
     const previousInert = background.map((element) =>
@@ -235,8 +224,7 @@ export function ArticleDiscussion({
         }),
       });
       const body = (await response.json().catch(() => ({}))) as
-        | DiscussionResponse
-        | { error?: string };
+        DiscussionResponse | { error?: string };
 
       if (
         controller.signal.aborted ||
@@ -268,7 +256,9 @@ export function ArticleDiscussion({
             : null),
       );
       if (body.incomplete) {
-        setError("The response stopped early. Ask again or narrow the question.");
+        setError(
+          "The response stopped early. Ask again or narrow the question.",
+        );
       }
     } catch (requestError) {
       if (
@@ -319,7 +309,11 @@ export function ArticleDiscussion({
               <MessageCircle size={15} />
               Article discussion
             </span>
-            <h3>{scope.kind === "selection" ? "Selected passage" : "Entire article"}</h3>
+            <h3>
+              {scope.kind === "selection"
+                ? "Selected passage"
+                : "Entire article"}
+            </h3>
           </div>
           <button
             className="icon-button"
@@ -347,7 +341,10 @@ export function ArticleDiscussion({
 
         <section className="voice-panel" aria-label="Voice discussion">
           <div className="voice-panel-copy">
-            <span className={`voice-orb ${voiceActive ? "active" : ""}`} aria-hidden="true">
+            <span
+              className={`voice-orb ${voiceActive ? "active" : ""}`}
+              aria-hidden="true"
+            >
               <AudioLines size={20} />
             </span>
             <div>
@@ -424,7 +421,10 @@ export function ArticleDiscussion({
             ))
           )}
           {isSending ? (
-            <div className="discussion-message assistant pending" aria-label="Sol is thinking">
+            <div
+              className="discussion-message assistant pending"
+              aria-label="Sol is thinking"
+            >
               <span>Sol</span>
               <div className="thinking-dots" aria-hidden="true">
                 <i />
@@ -437,7 +437,10 @@ export function ArticleDiscussion({
         </div>
 
         {(contextNote || error) && (
-          <div className={error ? "discussion-notice error" : "discussion-notice"} role="status">
+          <div
+            className={error ? "discussion-notice error" : "discussion-notice"}
+            role="status"
+          >
             {error ?? contextNote}
           </div>
         )}
@@ -584,8 +587,13 @@ function useArticleVoice({
 
         if (peer.connectionState === "connected") {
           setState("listening");
-        } else if (["failed", "closed", "disconnected"].includes(peer.connectionState)) {
-          fail("The voice connection ended. You can start a new session.", session);
+        } else if (
+          ["failed", "closed", "disconnected"].includes(peer.connectionState)
+        ) {
+          fail(
+            "The voice connection ended. You can start a new session.",
+            session,
+          );
         }
       };
 
@@ -609,14 +617,23 @@ function useArticleVoice({
         } else if (type === "response.done") {
           setState("listening");
         } else if (type === "error") {
-          fail("The live voice session reported an error. You can try again.", session);
+          fail(
+            "The live voice session reported an error. You can try again.",
+            session,
+          );
         }
       };
       events.onerror = () =>
-        fail("The live voice event channel failed. You can try again.", session);
+        fail(
+          "The live voice event channel failed. You can try again.",
+          session,
+        );
       events.onclose = () => {
         if (peer.connectionState !== "closed") {
-          fail("The live voice event channel closed. You can try again.", session);
+          fail(
+            "The live voice event channel closed. You can try again.",
+            session,
+          );
         }
       };
 
@@ -644,11 +661,15 @@ function useArticleVoice({
         const body = (await response.json().catch(() => ({}))) as {
           error?: string;
         };
-        throw new Error(body.error ?? `Voice setup failed with ${response.status}.`);
+        throw new Error(
+          body.error ?? `Voice setup failed with ${response.status}.`,
+        );
       }
 
       if (response.headers.get("x-ai-reader-context-truncated") === "true") {
-        setContextNote("The voice session uses the included portion of this article.");
+        setContextNote(
+          "The voice session uses the included portion of this article.",
+        );
       }
 
       const answerSdp = await response.text();
@@ -763,7 +784,10 @@ function voiceStateLabel(state: VoiceState) {
 }
 
 function messageId() {
-  return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return (
+    crypto.randomUUID?.() ??
+    `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
 }
 
 function messageFromError(error: unknown) {
