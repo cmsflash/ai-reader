@@ -457,6 +457,12 @@ export function ReaderApp() {
   }, [loadIntegrationStatus]);
 
   useEffect(() => {
+    if (appView !== "reader") {
+      setIsArticleLoading(false);
+      setArticleLoadError(null);
+      return;
+    }
+
     if (!selectedId) {
       setArticle(null);
       setArticleLoadError(null);
@@ -509,7 +515,13 @@ export function ReaderApp() {
     return () => {
       cancelled = true;
     };
-  }, [article?.id, articleLoadAttempt, selectedId, selectedPendingImport]);
+  }, [
+    appView,
+    article?.id,
+    articleLoadAttempt,
+    selectedId,
+    selectedPendingImport,
+  ]);
 
   useEffect(() => {
     if (
@@ -1045,6 +1057,9 @@ export function ReaderApp() {
         resolvedHistoryIdsRef.current,
         unavailableArticleIdsRef.current,
       );
+      setSelectedId((current) =>
+        current === pendingImport.id ? data.article.id : current,
+      );
       if (articleIdRef.current === pendingImport.id) {
         const pendingEntry = appHistoryEntry(window.history.state);
         writeAppHistory("replace", {
@@ -1053,7 +1068,6 @@ export function ReaderApp() {
           depth: pendingEntry?.depth ?? 1,
         });
         articleIdRef.current = data.article.id;
-        setSelectedId(data.article.id);
         setArticle(data.article);
       }
       setUrl("");
@@ -1067,9 +1081,11 @@ export function ReaderApp() {
       setPendingImports((current) =>
         current.filter((item) => item.id !== pendingImport.id),
       );
+      setSelectedId((current) =>
+        current === pendingImport.id ? null : current,
+      );
       if (articleIdRef.current === pendingImport.id) {
         articleIdRef.current = null;
-        setSelectedId(null);
         setArticle(null);
         replaceWithLibrary();
       }
@@ -1121,6 +1137,9 @@ export function ReaderApp() {
         resolvedHistoryIdsRef.current,
         unavailableArticleIdsRef.current,
       );
+      setSelectedId((current) =>
+        current === pendingImport.id ? data.article.id : current,
+      );
       if (articleIdRef.current === pendingImport.id) {
         const pendingEntry = appHistoryEntry(window.history.state);
         writeAppHistory("replace", {
@@ -1129,7 +1148,6 @@ export function ReaderApp() {
           depth: pendingEntry?.depth ?? 1,
         });
         articleIdRef.current = data.article.id;
-        setSelectedId(data.article.id);
         setArticle(data.article);
       }
       setStatus(null);
@@ -1142,9 +1160,11 @@ export function ReaderApp() {
       setPendingImports((current) =>
         current.filter((item) => item.id !== pendingImport.id),
       );
+      setSelectedId((current) =>
+        current === pendingImport.id ? null : current,
+      );
       if (articleIdRef.current === pendingImport.id) {
         articleIdRef.current = null;
-        setSelectedId(null);
         setArticle(null);
         replaceWithLibrary();
       }
