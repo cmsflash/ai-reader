@@ -115,7 +115,7 @@ type SelectionDiscussionAction = {
   tooLong: boolean;
 };
 
-type AppView = "library" | "reader" | "settings";
+type AppView = "library" | "add" | "reader" | "settings";
 
 type AppHistoryEntry = {
   view: AppView;
@@ -187,7 +187,7 @@ function appHistoryEntry(state: unknown): AppHistoryEntry | null {
   const candidate = entry as Partial<AppHistoryEntry>;
 
   if (
-    !["library", "reader", "settings"].includes(candidate.view ?? "") ||
+    !["library", "add", "reader", "settings"].includes(candidate.view ?? "") ||
     typeof candidate.depth !== "number"
   ) {
     return null;
@@ -250,12 +250,14 @@ export function ReaderApp() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const articleBodyRef = useRef<HTMLElement | null>(null);
   const libraryHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const addHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const settingsHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const readerBackButtonRef = useRef<HTMLButtonElement | null>(null);
   const hasMountedRef = useRef(false);
   const articleIdRef = useRef<string | null>(null);
   const scrollPositionsRef = useRef<Record<AppView, number>>({
     library: 0,
+    add: 0,
     reader: 0,
     settings: 0,
   });
@@ -334,9 +336,11 @@ export function ReaderApp() {
       const target =
         appView === "library"
           ? libraryHeadingRef.current
-          : appView === "settings"
-            ? settingsHeadingRef.current
-            : readerBackButtonRef.current;
+          : appView === "add"
+            ? addHeadingRef.current
+            : appView === "settings"
+              ? settingsHeadingRef.current
+              : readerBackButtonRef.current;
       target?.focus({ preventScroll: true });
     });
 
@@ -822,6 +826,30 @@ export function ReaderApp() {
     setAppView("library");
   }, [stopSpeaking]);
 
+  const replaceWithAdd = useCallback(() => {
+    stopSpeaking();
+    setDiscussionOpen(false);
+    setSelectionDiscussionAction(null);
+    window.getSelection()?.removeAllRanges();
+    articleIdRef.current = null;
+    const currentDepth = appHistoryEntry(window.history.state)?.depth ?? 1;
+    writeAppHistory("replace", { view: "add", depth: currentDepth });
+    setAppView("add");
+  }, [stopSpeaking]);
+
+  const showAdd = useCallback(() => {
+    stopSpeaking();
+    setSelectionDiscussionAction(null);
+    setError(null);
+    articleIdRef.current = null;
+    const currentDepth = appHistoryEntry(window.history.state)?.depth ?? 0;
+    writeAppHistory("push", {
+      view: "add",
+      depth: currentDepth + 1,
+    });
+    setAppView("add");
+  }, [stopSpeaking]);
+
   const showSettings = useCallback(() => {
     stopSpeaking();
     setSelectionDiscussionAction(null);
@@ -1025,10 +1053,10 @@ export function ReaderApp() {
     setPendingImports((current) => [pendingImport, ...current]);
     articleIdRef.current = pendingImport.id;
     const currentDepth = appHistoryEntry(window.history.state)?.depth ?? 0;
-    writeAppHistory("push", {
+    writeAppHistory("replace", {
       view: "reader",
       articleId: pendingImport.id,
-      depth: currentDepth + 1,
+      depth: currentDepth,
     });
     setSelectedId(pendingImport.id);
     setAppView("reader");
@@ -1087,7 +1115,7 @@ export function ReaderApp() {
       if (articleIdRef.current === pendingImport.id) {
         articleIdRef.current = null;
         setArticle(null);
-        replaceWithLibrary();
+        replaceWithAdd();
       }
       setError(messageFromError(submitError));
       setStatus(null);
@@ -1108,10 +1136,10 @@ export function ReaderApp() {
     setPendingImports((current) => [pendingImport, ...current]);
     articleIdRef.current = pendingImport.id;
     const currentDepth = appHistoryEntry(window.history.state)?.depth ?? 0;
-    writeAppHistory("push", {
+    writeAppHistory("replace", {
       view: "reader",
       articleId: pendingImport.id,
-      depth: currentDepth + 1,
+      depth: currentDepth,
     });
     setSelectedId(pendingImport.id);
     setAppView("reader");
@@ -1166,7 +1194,7 @@ export function ReaderApp() {
       if (articleIdRef.current === pendingImport.id) {
         articleIdRef.current = null;
         setArticle(null);
-        replaceWithLibrary();
+        replaceWithAdd();
       }
       setError(messageFromError(uploadError));
       setStatus(null);
@@ -1308,6 +1336,15 @@ export function ReaderApp() {
                 <RefreshCw size={18} />
               </button>
               <button
+                className="icon-button add-header-button"
+                type="button"
+                title="Add article"
+                aria-label="Add article"
+                onClick={showAdd}
+              >
+                <Plus size={20} />
+              </button>
+              <button
                 className="header-text-button"
                 type="button"
                 aria-label="Settings"
@@ -1339,51 +1376,6 @@ export function ReaderApp() {
               </span>
             </header>
 
-            <section className="library-add-panel" aria-label="Add to library">
-              <form className="import-form" onSubmit={handleUrlSubmit}>
-                <label className="url-field">
-                  <LinkIcon size={18} />
-                  <span className="visually-hidden">Article URL</span>
-                  <input
-                    value={url}
-                    onChange={(event) => setUrl(event.target.value)}
-                    placeholder="Paste an article URL"
-                    type="url"
-                    disabled={isImporting}
-                  />
-                </label>
-                <button
-                  className="primary-button"
-                  type="submit"
-                  disabled={isImporting || !url.trim()}
-                >
-                  <Plus size={18} />
-                  Save
-                </button>
-              </form>
-
-              <input
-                ref={fileInputRef}
-                className="visually-hidden"
-                type="file"
-                aria-hidden="true"
-                tabIndex={-1}
-                accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm,.mhtml,.mht,.mhtml.zip,.url,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain,text/html,application/xhtml+xml,message/rfc822,application/x-mimearchive,application/zip,application/internet-shortcut"
-                onChange={(event) =>
-                  void handleFileUpload(event.target.files?.[0])
-                }
-              />
-              <button
-                className="secondary-button upload-library-button"
-                type="button"
-                disabled={isImporting}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Upload size={17} />
-                Upload document
-              </button>
-            </section>
-
             {(status || error) && (
               <div className={error ? "notice error" : "notice"} role="status">
                 {error ?? status}
@@ -1398,7 +1390,7 @@ export function ReaderApp() {
               {libraryItems.length === 0 ? (
                 <div className="empty-library">
                   <FileText size={24} />
-                  <span>Save a URL or upload a document.</span>
+                  <span>Use Add to save your first article.</span>
                 </div>
               ) : (
                 libraryItems.map((item) =>
@@ -1418,6 +1410,101 @@ export function ReaderApp() {
                 )
               )}
             </nav>
+          </div>
+        </section>
+      ) : null}
+
+      {appView === "add" ? (
+        <section
+          className="add-view app-surface"
+          aria-labelledby="add-view-title"
+        >
+          <header className="app-bar add-app-bar">
+            <button className="back-button" type="button" onClick={showLibrary}>
+              <ChevronLeft size={20} />
+              <span>Library</span>
+            </button>
+            <div className="view-heading">
+              <span>AI Reader</span>
+              <h1 ref={addHeadingRef} id="add-view-title" tabIndex={-1}>
+                Add
+              </h1>
+            </div>
+            <span className="app-bar-spacer" aria-hidden="true" />
+          </header>
+
+          <div className="add-page">
+            <section className="add-card" aria-labelledby="add-card-title">
+              <header className="add-card-heading">
+                <span className="add-card-icon" aria-hidden="true">
+                  <Plus size={21} />
+                </span>
+                <div>
+                  <h2 id="add-card-title">Add to library</h2>
+                  <p>Save a web article or import a document for reading.</p>
+                </div>
+              </header>
+
+              <form className="add-url-form" onSubmit={handleUrlSubmit}>
+                <label className="url-field">
+                  <LinkIcon size={18} />
+                  <span className="visually-hidden">Article URL</span>
+                  <input
+                    value={url}
+                    onChange={(event) => setUrl(event.target.value)}
+                    placeholder="Paste an article URL"
+                    type="url"
+                    disabled={isImporting}
+                  />
+                </label>
+                <button
+                  className="primary-button"
+                  type="submit"
+                  disabled={isImporting || !url.trim()}
+                >
+                  <Plus size={18} />
+                  Save article
+                </button>
+              </form>
+
+              <div className="add-separator" aria-hidden="true">
+                <span>or</span>
+              </div>
+
+              <input
+                ref={fileInputRef}
+                className="visually-hidden"
+                type="file"
+                aria-hidden="true"
+                tabIndex={-1}
+                accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm,.mhtml,.mht,.mhtml.zip,.url,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain,text/html,application/xhtml+xml,message/rfc822,application/x-mimearchive,application/zip,application/internet-shortcut"
+                onChange={(event) =>
+                  void handleFileUpload(event.target.files?.[0])
+                }
+              />
+              <button
+                className="secondary-button add-upload-button"
+                type="button"
+                disabled={isImporting}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Upload size={18} />
+                Upload document
+              </button>
+              <p className="add-supported-copy">
+                PDF, Word, Markdown, text, HTML, MHTML, and @Voice archives are
+                supported.
+              </p>
+
+              {(status || error) && (
+                <div
+                  className={error ? "notice error" : "notice"}
+                  role="status"
+                >
+                  {error ?? status}
+                </div>
+              )}
+            </section>
           </div>
         </section>
       ) : null}
