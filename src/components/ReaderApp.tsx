@@ -6,6 +6,7 @@ import {
   Download,
   FileText,
   Link as LinkIcon,
+  Menu,
   MessageCircle,
   Pause,
   Play,
@@ -16,6 +17,7 @@ import {
   Trash2,
   Upload,
   Volume2,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
@@ -24,7 +26,11 @@ import {
   type ArticleDiscussionScope,
 } from "@/components/ArticleDiscussion";
 import { AuthSignOutButton } from "@/components/AuthSignOutButton";
-import { annotateBlocks, type AnnotatedBlock, type SentenceSegment } from "@/lib/sentences";
+import {
+  annotateBlocks,
+  type AnnotatedBlock,
+  type SentenceSegment,
+} from "@/lib/sentences";
 import type { Article, ArticleSummary, SourceType } from "@/lib/types";
 
 type ArticleListResponse = {
@@ -126,8 +132,12 @@ export function ReaderApp() {
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
   const [integrationStatus, setIntegrationStatus] =
     useState<IntegrationStatusResponse | null>(null);
-  const [integrationStatusError, setIntegrationStatusError] = useState<string | null>(null);
-  const [integrationNotice, setIntegrationNotice] = useState<string | null>(null);
+  const [integrationStatusError, setIntegrationStatusError] = useState<
+    string | null
+  >(null);
+  const [integrationNotice, setIntegrationNotice] = useState<string | null>(
+    null,
+  );
   const [instapaperFolder, setInstapaperFolder] = useState("unread");
   const [syncingIntegration, setSyncingIntegration] =
     useState<IntegrationProvider | null>(null);
@@ -136,9 +146,14 @@ export function ReaderApp() {
     useState<ArticleDiscussionScope>(wholeArticleDiscussionScope);
   const [selectionDiscussionAction, setSelectionDiscussionAction] =
     useState<SelectionDiscussionAction | null>(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const articleBodyRef = useRef<HTMLElement | null>(null);
+  const libraryPanelRef = useRef<HTMLElement | null>(null);
+  const libraryTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const libraryCloseButtonRef = useRef<HTMLButtonElement | null>(null);
+  const libraryWasOpenRef = useRef(false);
   const articleIdRef = useRef<string | null>(null);
   const sentencesRef = useRef<SentenceSegment[]>([]);
   const speechSessionRef = useRef(0);
@@ -160,7 +175,8 @@ export function ReaderApp() {
   }, [article]);
 
   const selectedPendingImport =
-    pendingImports.find((pendingImport) => pendingImport.id === selectedId) ?? null;
+    pendingImports.find((pendingImport) => pendingImport.id === selectedId) ??
+    null;
   const libraryItems = useMemo(
     () => [
       ...pendingImports.map((pendingImport) => ({
@@ -204,9 +220,63 @@ export function ReaderApp() {
     return () => {
       window.removeEventListener("resize", dismissSelectionAction);
       document.removeEventListener("scroll", dismissSelectionAction, true);
-      document.removeEventListener("selectionchange", dismissIfSelectionCleared);
+      document.removeEventListener(
+        "selectionchange",
+        dismissIfSelectionCleared,
+      );
     };
   }, [selectionDiscussionAction]);
+
+  useEffect(() => {
+    if (!libraryOpen) {
+      if (libraryWasOpenRef.current) {
+        libraryTriggerRef.current?.focus();
+      }
+      libraryWasOpenRef.current = false;
+      return;
+    }
+
+    libraryWasOpenRef.current = true;
+    const focusFrame = window.requestAnimationFrame(() => {
+      libraryCloseButtonRef.current?.focus();
+    });
+    const handleLibraryKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setLibraryOpen(false);
+        return;
+      }
+
+      if (event.key !== "Tab" || !libraryPanelRef.current) {
+        return;
+      }
+
+      const focusable = Array.from(
+        libraryPanelRef.current.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]):not([type="file"]), select:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => element.getClientRects().length > 0);
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      if (!first || !last) {
+        event.preventDefault();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    window.addEventListener("keydown", handleLibraryKeyDown);
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", handleLibraryKeyDown);
+    };
+  }, [libraryOpen]);
 
   useEffect(() => {
     sentencesRef.current = annotated.sentences;
@@ -235,7 +305,9 @@ export function ReaderApp() {
 
   const loadIntegrationStatus = useCallback(async () => {
     try {
-      const data = await requestJson<IntegrationStatusResponse>("/api/integrations/status");
+      const data = await requestJson<IntegrationStatusResponse>(
+        "/api/integrations/status",
+      );
       setIntegrationStatus(data);
       setIntegrationStatusError(null);
     } catch (loadError) {
@@ -296,7 +368,9 @@ export function ReaderApp() {
     async function loadArticle() {
       setIsArticleLoading(true);
       try {
-        const data = await requestJson<ArticleResponse>(`/api/articles/${selectedId}`);
+        const data = await requestJson<ArticleResponse>(
+          `/api/articles/${selectedId}`,
+        );
         if (cancelled) {
           return;
         }
@@ -337,39 +411,36 @@ export function ReaderApp() {
     });
   }, [article]);
 
-  const saveProgress = useCallback(
-    async (sentenceIndex: number) => {
-      const id = articleIdRef.current;
+  const saveProgress = useCallback(async (sentenceIndex: number) => {
+    const id = articleIdRef.current;
 
-      if (!id) {
-        return;
-      }
+    if (!id) {
+      return;
+    }
 
-      const sentenceCount = sentencesRef.current.length;
+    const sentenceCount = sentencesRef.current.length;
 
-      const data = await requestJson<ArticleResponse>(`/api/articles/${id}`, {
-        method: "PATCH",
-        headers: {
-          "content-type": "application/json",
+    const data = await requestJson<ArticleResponse>(`/api/articles/${id}`, {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        progress: {
+          sentenceIndex,
+          percent: progressPercentForSentence(sentenceIndex, sentenceCount),
         },
-        body: JSON.stringify({
-          progress: {
-            sentenceIndex,
-            percent: progressPercentForSentence(sentenceIndex, sentenceCount),
-          },
-        }),
-      });
+      }),
+    });
 
-      setArticle((current) => (current?.id === id ? data.article : current));
+    setArticle((current) => (current?.id === id ? data.article : current));
 
-      if (data.summary) {
-        setArticles((current) =>
-          current.map((item) => (item.id === id ? data.summary ?? item : item)),
-        );
-      }
-    },
-    [],
-  );
+    if (data.summary) {
+      setArticles((current) =>
+        current.map((item) => (item.id === id ? (data.summary ?? item) : item)),
+      );
+    }
+  }, []);
 
   const cleanupAudio = useCallback(() => {
     if (audioRef.current) {
@@ -409,11 +480,17 @@ export function ReaderApp() {
       });
 
       if (!response.ok) {
-        const body = (await response.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? `TTS request failed with ${response.status}.`);
+        const body = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        throw new Error(
+          body.error ?? `TTS request failed with ${response.status}.`,
+        );
       }
 
-      const costUsd = Number(response.headers.get("x-processing-cost-usd") ?? 0);
+      const costUsd = Number(
+        response.headers.get("x-processing-cost-usd") ?? 0,
+      );
       const audioBlob = await response.blob();
 
       if (speechSessionRef.current !== session) {
@@ -425,7 +502,9 @@ export function ReaderApp() {
           current?.id === articleId
             ? {
                 ...current,
-                processingCostUsd: roundCost((current.processingCostUsd ?? 0) + costUsd),
+                processingCostUsd: roundCost(
+                  (current.processingCostUsd ?? 0) + costUsd,
+                ),
               }
             : current,
         );
@@ -434,7 +513,9 @@ export function ReaderApp() {
             item.id === articleId
               ? {
                   ...item,
-                  processingCostUsd: roundCost((item.processingCostUsd ?? 0) + costUsd),
+                  processingCostUsd: roundCost(
+                    (item.processingCostUsd ?? 0) + costUsd,
+                  ),
                 }
               : item,
           ),
@@ -465,7 +546,10 @@ export function ReaderApp() {
         return;
       }
 
-      const startIndex = Math.min(Math.max(sentenceIndex, 0), sentences.length - 1);
+      const startIndex = Math.min(
+        Math.max(sentenceIndex, 0),
+        sentences.length - 1,
+      );
       const session = speechSessionRef.current + 1;
       speechSessionRef.current = session;
       cleanupAudio();
@@ -497,9 +581,13 @@ export function ReaderApp() {
             return;
           }
 
-          setError(`${messageFromError(playbackError)} Falling back to browser voice.`);
+          setError(
+            `${messageFromError(playbackError)} Falling back to browser voice.`,
+          );
           try {
-            speakWithBrowser(segment.text, () => window.setTimeout(() => void speakAt(index + 1), 80));
+            speakWithBrowser(segment.text, () =>
+              window.setTimeout(() => void speakAt(index + 1), 80),
+            );
           } catch (fallbackError) {
             setIsSpeaking(false);
             setError(messageFromError(fallbackError));
@@ -559,7 +647,12 @@ export function ReaderApp() {
     const root = articleBodyRef.current;
     const selection = window.getSelection();
 
-    if (!root || !selection || selection.isCollapsed || selection.rangeCount === 0) {
+    if (
+      !root ||
+      !selection ||
+      selection.isCollapsed ||
+      selection.rangeCount === 0
+    ) {
       setSelectionDiscussionAction(null);
       return;
     }
@@ -656,15 +749,24 @@ export function ReaderApp() {
         body: JSON.stringify({ url: url.trim() }),
       });
 
-      setPendingImports((current) => current.filter((item) => item.id !== pendingImport.id));
-      setArticles((current) => [data.summary, ...current.filter((item) => item.id !== data.summary.id)]);
+      setPendingImports((current) =>
+        current.filter((item) => item.id !== pendingImport.id),
+      );
+      setArticles((current) => [
+        data.summary,
+        ...current.filter((item) => item.id !== data.summary.id),
+      ]);
       setSelectedId(data.article.id);
       setArticle(data.article);
       setUrl("");
       setStatus(null);
     } catch (submitError) {
-      setPendingImports((current) => current.filter((item) => item.id !== pendingImport.id));
-      setSelectedId((current) => (current === pendingImport.id ? articles[0]?.id ?? null : current));
+      setPendingImports((current) =>
+        current.filter((item) => item.id !== pendingImport.id),
+      );
+      setSelectedId((current) =>
+        current === pendingImport.id ? (articles[0]?.id ?? null) : current,
+      );
       setError(messageFromError(submitError));
       setStatus(null);
     } finally {
@@ -693,14 +795,23 @@ export function ReaderApp() {
         body: form,
       });
 
-      setPendingImports((current) => current.filter((item) => item.id !== pendingImport.id));
-      setArticles((current) => [data.summary, ...current.filter((item) => item.id !== data.summary.id)]);
+      setPendingImports((current) =>
+        current.filter((item) => item.id !== pendingImport.id),
+      );
+      setArticles((current) => [
+        data.summary,
+        ...current.filter((item) => item.id !== data.summary.id),
+      ]);
       setSelectedId(data.article.id);
       setArticle(data.article);
       setStatus(null);
     } catch (uploadError) {
-      setPendingImports((current) => current.filter((item) => item.id !== pendingImport.id));
-      setSelectedId((current) => (current === pendingImport.id ? articles[0]?.id ?? null : current));
+      setPendingImports((current) =>
+        current.filter((item) => item.id !== pendingImport.id),
+      );
+      setSelectedId((current) =>
+        current === pendingImport.id ? (articles[0]?.id ?? null) : current,
+      );
       setError(messageFromError(uploadError));
       setStatus(null);
     } finally {
@@ -714,7 +825,9 @@ export function ReaderApp() {
   async function handleIntegrationSync(provider: IntegrationProvider) {
     setSyncingIntegration(provider);
     setIntegrationNotice(
-      provider === "instapaper" ? "Syncing Instapaper…" : "Syncing @Voice from Dropbox…",
+      provider === "instapaper"
+        ? "Syncing Instapaper…"
+        : "Syncing @Voice from Dropbox…",
     );
 
     try {
@@ -776,6 +889,23 @@ export function ReaderApp() {
   }
 
   const readableProgress = article ? progressRatio(article) : 0;
+  const firstContentBlockIndex = annotated.blocks.findIndex(
+    annotatedBlockHasContent,
+  );
+  const firstContentBlock =
+    firstContentBlockIndex >= 0
+      ? annotated.blocks[firstContentBlockIndex]
+      : undefined;
+  const leadingTitleBlock =
+    article &&
+    firstContentBlock?.type === "heading" &&
+    normalizedComparableTitle(firstContentBlock.text) ===
+      normalizedComparableTitle(article.title)
+      ? firstContentBlock
+      : null;
+  const visibleArticleBlocks = leadingTitleBlock
+    ? annotated.blocks.slice(firstContentBlockIndex + 1)
+    : annotated.blocks;
   const instapaperStatus = integrationStatus?.instapaper;
   const dropboxStatus = integrationStatus?.dropbox;
   const instapaperReady = integrationProviderReady(instapaperStatus);
@@ -784,231 +914,337 @@ export function ReaderApp() {
 
   return (
     <main className="reader-app">
-      <aside className="library-panel" aria-label="Library">
-        <header className="brand-row">
-          <div className="brand-mark" aria-hidden="true">
-            <BookOpen size={20} />
-          </div>
-          <div>
-            <h1>AI Reader</h1>
-            <p>{libraryCountLabel(articles.length, pendingImports.length)}</p>
-          </div>
-          <div className="brand-actions">
-            <button
-              className="icon-button"
-              type="button"
-              title="Refresh"
-              aria-label="Refresh"
-              onClick={() => void loadArticles(true)}
-            >
-              <RefreshCw size={18} />
-            </button>
-            {authStatus?.enabled ? <AuthSignOutButton onBeforeSignOut={stopSpeaking} /> : null}
-          </div>
-        </header>
-
-        <form className="import-form" onSubmit={handleUrlSubmit}>
-          <label className="url-field">
-            <LinkIcon size={18} />
-            <input
-              value={url}
-              onChange={(event) => setUrl(event.target.value)}
-              placeholder="https://example.com/article"
-              type="url"
-              disabled={isImporting}
-            />
-          </label>
-          <button className="primary-button" type="submit" disabled={isImporting || !url.trim()}>
-            <Plus size={18} />
-            Save URL
-          </button>
-        </form>
-
-        <input
-          ref={fileInputRef}
-          className="visually-hidden"
-          type="file"
-          accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm,.mhtml,.mht,.mhtml.zip,.url,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain,text/html,application/xhtml+xml,message/rfc822,application/x-mimearchive,application/zip,application/internet-shortcut"
-          onChange={(event) => void handleFileUpload(event.target.files?.[0])}
-        />
-
-        <button
-          className="secondary-button"
-          type="button"
-          disabled={isImporting}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <Upload size={18} />
-          Upload document
-        </button>
-
-        <details className="settings-panel integrations-panel">
-          <summary>
-            <CloudDownload size={17} />
-            Imports &amp; sharing
-          </summary>
-
-          <div className="integration-stack">
-            <section className="integration-card" aria-labelledby="instapaper-integration-title">
-              <div className="integration-card-header">
-                <div>
-                  <h3 id="instapaper-integration-title">Instapaper</h3>
-                  <p>{integrationProviderLabel(instapaperStatus, integrationStatusError)}</p>
-                </div>
-                <span className={instapaperReady ? "integration-badge ready" : "integration-badge"}>
-                  {integrationProviderBadgeLabel(instapaperStatus, integrationStatusError)}
-                </span>
-              </div>
-
-              <div className="integration-controls">
-                <label>
-                  Folder
-                  <select
-                    value={instapaperFolder}
-                    disabled={!instapaperReady || syncingIntegration !== null}
-                    onChange={(event) => setInstapaperFolder(event.target.value)}
-                  >
-                    {instapaperFolders.map((folder) => (
-                      <option key={folder.id} value={folder.id}>
-                        {folder.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  className="integration-sync-button"
-                  type="button"
-                  disabled={!instapaperReady || syncingIntegration !== null}
-                  onClick={() => void handleIntegrationSync("instapaper")}
-                >
-                  <RefreshCw
-                    className={syncingIntegration === "instapaper" ? "spin" : undefined}
-                    size={15}
-                  />
-                  Sync
-                </button>
-              </div>
-            </section>
-
-            <section className="integration-card" aria-labelledby="dropbox-integration-title">
-              <div className="integration-card-header">
-                <div>
-                  <h3 id="dropbox-integration-title">@Voice Reader</h3>
-                  <p>{integrationProviderLabel(dropboxStatus, integrationStatusError)}</p>
-                </div>
-                <span className={dropboxReady ? "integration-badge ready" : "integration-badge"}>
-                  {integrationProviderBadgeLabel(dropboxStatus, integrationStatusError)}
-                </span>
-              </div>
-
-              <div className="integration-dropbox-row">
-                <span>{dropboxStatus?.folder || "/Apps/@Voice"}</span>
-                <button
-                  className="integration-sync-button"
-                  type="button"
-                  disabled={!dropboxReady || syncingIntegration !== null}
-                  onClick={() => void handleIntegrationSync("dropbox")}
-                >
-                  <RefreshCw
-                    className={syncingIntegration === "dropbox" ? "spin" : undefined}
-                    size={15}
-                  />
-                  Sync
-                </button>
-              </div>
-            </section>
-
-            <section className="integration-help" aria-labelledby="share-import-title">
-              <div className="integration-help-title">
-                <Share2 size={16} />
-                <h3 id="share-import-title">Quick save</h3>
-              </div>
-              <p>
-                Install AI Reader on Android to add it to the Share sheet. On iPhone or iPad, use
-                the AI Reader Share Sheet shortcut.
-              </p>
-              <a
-                className="integration-download-link"
-                href="/ai-reader-chrome-extension.zip"
-                download
-              >
-                <Download size={15} />
-                Download Chrome extension
-              </a>
-            </section>
-
-            {(integrationNotice || integrationStatusError) && (
-              <p
-                className={
-                  !integrationNotice && integrationStatusError
-                    ? "integration-message error"
-                    : "integration-message"
-                }
-                role="status"
-              >
-                {integrationNotice ?? `Integration status unavailable: ${integrationStatusError}`}
-              </p>
-            )}
-          </div>
-        </details>
-
-        <details className="settings-panel">
-          <summary>
-            <Settings2 size={17} />
-            TTS
-          </summary>
-          <label>
-            Voice speed
-            <input
-              min="0.7"
-              max="1.4"
-              step="0.05"
-              type="range"
-              value={rate}
-              onChange={(event) => setRate(Number(event.target.value))}
-            />
-          </label>
-        </details>
-
-        {(status || error) && (
-          <div className={error ? "notice error" : "notice"} role="status">
-            {error ?? status}
-          </div>
-        )}
-
-        <nav className="article-list" aria-label="Saved articles">
-          {libraryItems.length === 0 ? (
-            <div className="empty-library">
-              <FileText size={22} />
-              <span>Save a URL or upload a document.</span>
+      <aside
+        ref={libraryPanelRef}
+        className={`library-panel ${libraryOpen ? "mobile-open" : ""}`}
+        id="reader-library"
+        aria-label="Library"
+      >
+        <div className="library-utilities">
+          <header className="brand-row">
+            <div className="brand-mark" aria-hidden="true">
+              <BookOpen size={20} />
             </div>
-          ) : (
-            libraryItems.map((item) =>
-              item.kind === "pending" ? (
-                <PendingImportRow
-                  key={item.pendingImport.id}
-                  pendingImport={item.pendingImport}
-                  selected={item.pendingImport.id === selectedId}
-                  onSelect={() => {
-                    stopSpeaking();
-                    setSelectedId(item.pendingImport.id);
-                  }}
-                />
-              ) : (
-                <ArticleRow
-                  key={item.articleSummary.id}
-                  item={item.articleSummary}
-                  selected={item.articleSummary.id === selectedId}
-                  onSelect={() => {
-                    stopSpeaking();
-                    setSelectedId(item.articleSummary.id);
-                  }}
-                />
-              ),
-            )
+            <div>
+              <h1>AI Reader</h1>
+              <p>Read, listen, discuss</p>
+            </div>
+            <div className="brand-actions">
+              <button
+                className="icon-button"
+                type="button"
+                title="Refresh library"
+                aria-label="Refresh library"
+                onClick={() => void loadArticles(true)}
+              >
+                <RefreshCw size={18} />
+              </button>
+              {authStatus?.enabled ? (
+                <AuthSignOutButton onBeforeSignOut={stopSpeaking} />
+              ) : null}
+              <button
+                ref={libraryCloseButtonRef}
+                className="icon-button mobile-library-close"
+                type="button"
+                title="Close library"
+                aria-label="Close library"
+                onClick={() => setLibraryOpen(false)}
+              >
+                <X size={19} />
+              </button>
+            </div>
+          </header>
+
+          <form className="import-form" onSubmit={handleUrlSubmit}>
+            <label className="url-field">
+              <LinkIcon size={18} />
+              <input
+                value={url}
+                onChange={(event) => setUrl(event.target.value)}
+                placeholder="https://example.com/article"
+                type="url"
+                disabled={isImporting}
+              />
+            </label>
+            <button
+              className="primary-button"
+              type="submit"
+              disabled={isImporting || !url.trim()}
+            >
+              <Plus size={18} />
+              Save URL
+            </button>
+          </form>
+
+          <input
+            ref={fileInputRef}
+            className="visually-hidden"
+            type="file"
+            accept=".pdf,.docx,.md,.markdown,.txt,.html,.htm,.mhtml,.mht,.mhtml.zip,.url,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain,text/html,application/xhtml+xml,message/rfc822,application/x-mimearchive,application/zip,application/internet-shortcut"
+            onChange={(event) => void handleFileUpload(event.target.files?.[0])}
+          />
+
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={isImporting}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Upload size={18} />
+            Upload document
+          </button>
+
+          <details className="settings-panel integrations-panel">
+            <summary>
+              <CloudDownload size={17} />
+              Imports &amp; sharing
+            </summary>
+
+            <div className="integration-stack">
+              <section
+                className="integration-card"
+                aria-labelledby="instapaper-integration-title"
+              >
+                <div className="integration-card-header">
+                  <div>
+                    <h3 id="instapaper-integration-title">Instapaper</h3>
+                    <p>
+                      {integrationProviderLabel(
+                        instapaperStatus,
+                        integrationStatusError,
+                      )}
+                    </p>
+                  </div>
+                  <span
+                    className={
+                      instapaperReady
+                        ? "integration-badge ready"
+                        : "integration-badge"
+                    }
+                  >
+                    {integrationProviderBadgeLabel(
+                      instapaperStatus,
+                      integrationStatusError,
+                    )}
+                  </span>
+                </div>
+
+                <div className="integration-controls">
+                  <label>
+                    Folder
+                    <select
+                      value={instapaperFolder}
+                      disabled={!instapaperReady || syncingIntegration !== null}
+                      onChange={(event) =>
+                        setInstapaperFolder(event.target.value)
+                      }
+                    >
+                      {instapaperFolders.map((folder) => (
+                        <option key={folder.id} value={folder.id}>
+                          {folder.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    className="integration-sync-button"
+                    type="button"
+                    disabled={!instapaperReady || syncingIntegration !== null}
+                    onClick={() => void handleIntegrationSync("instapaper")}
+                  >
+                    <RefreshCw
+                      className={
+                        syncingIntegration === "instapaper" ? "spin" : undefined
+                      }
+                      size={15}
+                    />
+                    Sync
+                  </button>
+                </div>
+              </section>
+
+              <section
+                className="integration-card"
+                aria-labelledby="dropbox-integration-title"
+              >
+                <div className="integration-card-header">
+                  <div>
+                    <h3 id="dropbox-integration-title">@Voice Reader</h3>
+                    <p>
+                      {integrationProviderLabel(
+                        dropboxStatus,
+                        integrationStatusError,
+                      )}
+                    </p>
+                  </div>
+                  <span
+                    className={
+                      dropboxReady
+                        ? "integration-badge ready"
+                        : "integration-badge"
+                    }
+                  >
+                    {integrationProviderBadgeLabel(
+                      dropboxStatus,
+                      integrationStatusError,
+                    )}
+                  </span>
+                </div>
+
+                <div className="integration-dropbox-row">
+                  <span>{dropboxStatus?.folder || "/Apps/@Voice"}</span>
+                  <button
+                    className="integration-sync-button"
+                    type="button"
+                    disabled={!dropboxReady || syncingIntegration !== null}
+                    onClick={() => void handleIntegrationSync("dropbox")}
+                  >
+                    <RefreshCw
+                      className={
+                        syncingIntegration === "dropbox" ? "spin" : undefined
+                      }
+                      size={15}
+                    />
+                    Sync
+                  </button>
+                </div>
+              </section>
+
+              <section
+                className="integration-help"
+                aria-labelledby="share-import-title"
+              >
+                <div className="integration-help-title">
+                  <Share2 size={16} />
+                  <h3 id="share-import-title">Quick save</h3>
+                </div>
+                <p>
+                  Install AI Reader on Android to add it to the Share sheet. On
+                  iPhone or iPad, use the AI Reader Share Sheet shortcut.
+                </p>
+                <a
+                  className="integration-download-link"
+                  href="/ai-reader-chrome-extension.zip"
+                  download
+                >
+                  <Download size={15} />
+                  Download Chrome extension
+                </a>
+              </section>
+
+              {(integrationNotice || integrationStatusError) && (
+                <p
+                  className={
+                    !integrationNotice && integrationStatusError
+                      ? "integration-message error"
+                      : "integration-message"
+                  }
+                  role="status"
+                >
+                  {integrationNotice ??
+                    `Integration status unavailable: ${integrationStatusError}`}
+                </p>
+              )}
+            </div>
+          </details>
+
+          <details className="settings-panel">
+            <summary>
+              <Settings2 size={17} />
+              TTS
+            </summary>
+            <label>
+              Voice speed
+              <input
+                min="0.7"
+                max="1.4"
+                step="0.05"
+                type="range"
+                value={rate}
+                onChange={(event) => setRate(Number(event.target.value))}
+              />
+            </label>
+          </details>
+
+          {(status || error) && (
+            <div className={error ? "notice error" : "notice"} role="status">
+              {error ?? status}
+            </div>
           )}
-        </nav>
+        </div>
+
+        <section
+          className="library-index"
+          aria-labelledby="library-index-title"
+        >
+          <header className="library-index-header">
+            <div>
+              <span className="library-eyebrow">Saved reads</span>
+              <h2 id="library-index-title">Library</h2>
+            </div>
+            <span>
+              {libraryCountLabel(articles.length, pendingImports.length)}
+            </span>
+          </header>
+
+          <nav className="article-list" aria-label="Saved articles">
+            {libraryItems.length === 0 ? (
+              <div className="empty-library">
+                <FileText size={22} />
+                <span>Save a URL or upload a document.</span>
+              </div>
+            ) : (
+              libraryItems.map((item) =>
+                item.kind === "pending" ? (
+                  <PendingImportRow
+                    key={item.pendingImport.id}
+                    pendingImport={item.pendingImport}
+                    selected={item.pendingImport.id === selectedId}
+                    onSelect={() => {
+                      stopSpeaking();
+                      setSelectedId(item.pendingImport.id);
+                      setLibraryOpen(false);
+                    }}
+                  />
+                ) : (
+                  <ArticleRow
+                    key={item.articleSummary.id}
+                    item={item.articleSummary}
+                    selected={item.articleSummary.id === selectedId}
+                    onSelect={() => {
+                      stopSpeaking();
+                      setSelectedId(item.articleSummary.id);
+                      setLibraryOpen(false);
+                    }}
+                  />
+                ),
+              )
+            )}
+          </nav>
+        </section>
       </aside>
+
+      <button
+        ref={libraryTriggerRef}
+        className="mobile-library-trigger"
+        type="button"
+        aria-controls="reader-library"
+        aria-expanded={libraryOpen}
+        aria-label="Open library"
+        onClick={() => setLibraryOpen(true)}
+      >
+        <Menu size={20} />
+        <span>Library</span>
+      </button>
+
+      {libraryOpen ? (
+        <button
+          className="library-scrim"
+          type="button"
+          aria-label="Close library"
+          onClick={() => setLibraryOpen(false)}
+        />
+      ) : null}
 
       <section className="reader-panel" aria-label="Reader">
         {!selectedId ? (
@@ -1026,26 +1262,22 @@ export function ReaderApp() {
         ) : (
           <>
             <header className="reader-toolbar">
-              <div className="article-title-block">
-                <span className="source-pill">{sourceLabel(article.sourceType)}</span>
-                <h2>{article.title}</h2>
-                <div className="article-meta-row" aria-label="Article metadata">
-                  <span>{article.wordCount.toLocaleString()} words</span>
-                  <span>{article.estimatedMinutes} min audio</span>
-                  <span>{formatDate(article.createdAt)}</span>
-                  {article.sourceUrl ? <span>{sourceDomain(article.sourceUrl)}</span> : null}
-                  <span>{formatCost(article.processingCostUsd ?? 0)} API cost</span>
-                </div>
+              <div className="reader-toolbar-context">
+                <span className="source-pill">
+                  {sourceLabel(article.sourceType)}
+                </span>
+                <span className="reader-toolbar-title">{article.title}</span>
               </div>
 
               <div className="reader-actions">
                 <button
                   className="secondary-button discuss-article-button"
                   type="button"
+                  aria-label="Discuss this article"
                   onClick={openWholeArticleDiscussion}
                 >
                   <MessageCircle size={18} />
-                  Discuss
+                  <span>Discuss</span>
                 </button>
                 <button
                   className="round-button primary"
@@ -1064,7 +1296,9 @@ export function ReaderApp() {
                 </button>
                 <label className="rate-inline" title="Voice speed">
                   <Volume2 size={18} />
+                  <span className="visually-hidden">Voice speed</span>
                   <input
+                    aria-label="Voice speed"
                     min="0.7"
                     max="1.4"
                     step="0.05"
@@ -1085,7 +1319,14 @@ export function ReaderApp() {
               </div>
             </header>
 
-            <div className="progress-strip" aria-hidden="true">
+            <div
+              className="progress-strip"
+              role="progressbar"
+              aria-label="Reading progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(readableProgress * 100)}
+            >
               <span style={{ width: `${readableProgress * 100}%` }} />
             </div>
 
@@ -1096,7 +1337,44 @@ export function ReaderApp() {
                 onPointerUp={captureArticleSelection}
                 onKeyUp={captureArticleSelection}
               >
-                {annotated.blocks.map((block) => (
+                <header className="article-document-header">
+                  <div className="article-source-line">
+                    <span>{sourceLabel(article.sourceType)}</span>
+                    {article.sourceUrl ? (
+                      <a
+                        href={article.sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {sourceDomain(article.sourceUrl)}
+                      </a>
+                    ) : null}
+                  </div>
+                  <h1>
+                    {leadingTitleBlock ? (
+                      <SentenceChunks
+                        chunks={leadingTitleBlock.chunks}
+                        currentSentence={currentSentence}
+                        onSentenceTap={handleSentenceTap}
+                      />
+                    ) : (
+                      article.title
+                    )}
+                  </h1>
+                  <div
+                    className="article-meta-row"
+                    aria-label="Article metadata"
+                  >
+                    <span>{article.wordCount.toLocaleString()} words</span>
+                    <span>{article.estimatedMinutes} min audio</span>
+                    <span>{formatDate(article.createdAt)}</span>
+                    <span>
+                      {formatCost(article.processingCostUsd ?? 0)} API cost
+                    </span>
+                  </div>
+                </header>
+
+                {visibleArticleBlocks.map((block) => (
                   <ArticleBlockView
                     key={block.id}
                     block={block}
@@ -1169,8 +1447,13 @@ function ArticleRow({
       <span className="article-row-main">
         <span className="article-row-title">{item.title}</span>
         <span className="article-row-meta">
-          {sourceLabel(item.sourceType)} / {item.estimatedMinutes} min /{" "}
-          {Math.round(progressRatio(item) * 100)}%
+          {item.sourceUrl
+            ? sourceDomain(item.sourceUrl)
+            : sourceLabel(item.sourceType)}
+          {" · "}
+          {item.estimatedMinutes} min
+          {" · "}
+          {Math.round(progressRatio(item) * 100)}% read
         </span>
         <span className="mini-progress" aria-hidden="true">
           <span style={{ width: `${progressRatio(item) * 100}%` }} />
@@ -1202,7 +1485,8 @@ function PendingImportRow({
       <span className="article-row-main">
         <span className="article-row-title">{pendingImport.title}</span>
         <span className="article-row-meta">
-          {sourceLabel(pendingImport.sourceType)} / Parsing / {pendingImport.detail}
+          {sourceLabel(pendingImport.sourceType)} · Parsing ·{" "}
+          {pendingImport.detail}
         </span>
         <span className="mini-progress indeterminate" aria-hidden="true">
           <span />
@@ -1234,7 +1518,10 @@ function ArticleBlockView({
   onSentenceTap: (sentenceIndex: number) => void;
 }) {
   if (block.type === "heading") {
-    const HeadingTag = `h${Math.min(Math.max(block.level, 2), 4)}` as "h2" | "h3" | "h4";
+    const HeadingTag = `h${Math.min(Math.max(block.level, 2), 4)}` as
+      | "h2"
+      | "h3"
+      | "h4";
     return (
       <HeadingTag>
         <SentenceChunks
@@ -1291,7 +1578,9 @@ function ArticleBlockView({
   }
 
   if (block.type === "image") {
-    const src = block.src ? proxiedImageSrc(block.src, articleSourceUrl) : undefined;
+    const src = block.src
+      ? proxiedImageSrc(block.src, articleSourceUrl)
+      : undefined;
 
     return (
       <figure className="article-image-block">
@@ -1328,16 +1617,23 @@ function ArticleBlockView({
             />
           </figcaption>
         ) : null}
-        <div className="table-scroll" role="region" aria-label={block.caption ?? "Article table"}>
+        <div
+          className="table-scroll"
+          role="region"
+          aria-label={block.caption ?? "Article table"}
+        >
           <table>
             <tbody>
               {block.cellChunks.map((row, rowIndex) => (
                 <tr key={`${block.id}-row-${rowIndex}`}>
                   {row.map((chunks, cellIndex) => {
-                    const CellTag = rowIndex < (block.headerRows ?? 0) ? "th" : "td";
+                    const CellTag =
+                      rowIndex < (block.headerRows ?? 0) ? "th" : "td";
 
                     return (
-                      <CellTag key={`${block.id}-cell-${rowIndex}-${cellIndex}`}>
+                      <CellTag
+                        key={`${block.id}-cell-${rowIndex}-${cellIndex}`}
+                      >
                         {chunks.length > 0 ? (
                           <SentenceChunks
                             chunks={chunks}
@@ -1384,6 +1680,9 @@ function SentenceChunks({
       key={chunk.sentenceIndex}
       className={`sentence ${chunk.sentenceIndex === currentSentence ? "active" : ""}`}
       data-sentence-index={chunk.sentenceIndex}
+      aria-current={
+        chunk.sentenceIndex === currentSentence ? "true" : undefined
+      }
       role="button"
       tabIndex={0}
       onClick={() => onSentenceTap(chunk.sentenceIndex)}
@@ -1403,9 +1702,7 @@ function SentenceChunks({
 
 function integrationProviderReady(status?: IntegrationProviderStatus) {
   return (
-    status?.configured === true &&
-    status.connected !== false &&
-    !status.message
+    status?.configured === true && status.connected !== false && !status.message
   );
 }
 
@@ -1451,9 +1748,14 @@ function integrationFolderOptions(folders: IntegrationFolder[] | undefined) {
 
     const id = String(rawId);
     const title =
-      folder.displayTitle || folder.display_title || folder.title || `Folder ${String(rawId)}`;
+      folder.displayTitle ||
+      folder.display_title ||
+      folder.title ||
+      `Folder ${String(rawId)}`;
     const label =
-      typeof folder.count === "number" && folder.count >= 0 ? `${title} (${folder.count})` : title;
+      typeof folder.count === "number" && folder.count >= 0
+        ? `${title} (${folder.count})`
+        : title;
     options.set(id, label);
   }
 
@@ -1475,7 +1777,8 @@ function integrationSyncMessage(
   }
 
   const name = provider === "instapaper" ? "Instapaper" : "@Voice";
-  const remaining = result.remaining > 0 ? ` · ${result.remaining} remaining` : "";
+  const remaining =
+    result.remaining > 0 ? ` · ${result.remaining} remaining` : "";
 
   return `${name}: ${result.imported} imported · ${result.deduplicated} deduplicated · ${result.reconciled} reconciled · ${result.skipped} skipped · ${result.failed} failed${remaining}${detailSuffix}`;
 }
@@ -1528,7 +1831,9 @@ function pendingImportId() {
 function titleFromInputUrl(rawUrl: string) {
   try {
     const parsed = new URL(rawUrl);
-    const lastPath = decodeURIComponent(parsed.pathname.split("/").filter(Boolean).at(-1) ?? "");
+    const lastPath = decodeURIComponent(
+      parsed.pathname.split("/").filter(Boolean).at(-1) ?? "",
+    );
     return lastPath || parsed.hostname;
   } catch {
     return rawUrl;
@@ -1554,21 +1859,31 @@ function sourceTypeFromFileName(fileName: string): SourceType {
 }
 
 function libraryCountLabel(articleCount: number, pendingCount: number) {
-  const articleLabel = articleCount === 1 ? "1 article" : `${articleCount} articles`;
+  const articleLabel =
+    articleCount === 1 ? "1 article" : `${articleCount} articles`;
 
   if (pendingCount === 0) {
     return articleLabel;
   }
 
-  const pendingLabel = pendingCount === 1 ? "1 parsing" : `${pendingCount} parsing`;
+  const pendingLabel =
+    pendingCount === 1 ? "1 parsing" : `${pendingCount} parsing`;
   return `${articleLabel} / ${pendingLabel}`;
 }
 
-function progressRatio(article: Pick<ArticleSummary, "progress" | "sentenceCount">) {
-  return progressPercentForSentence(article.progress.sentenceIndex, article.sentenceCount);
+function progressRatio(
+  article: Pick<ArticleSummary, "progress" | "sentenceCount">,
+) {
+  return progressPercentForSentence(
+    article.progress.sentenceIndex,
+    article.sentenceCount,
+  );
 }
 
-function progressPercentForSentence(sentenceIndex: number, sentenceCount: number) {
+function progressPercentForSentence(
+  sentenceIndex: number,
+  sentenceCount: number,
+) {
   if (sentenceCount <= 1) {
     return sentenceCount === 1 && sentenceIndex > 0 ? 1 : 0;
   }
@@ -1598,6 +1913,33 @@ function sourceGlyph(sourceType: SourceType) {
   };
 
   return glyphs[sourceType];
+}
+
+function annotatedBlockHasContent(block: AnnotatedBlock) {
+  if (block.type === "list") {
+    return block.itemChunks.some((chunks) => chunks.length > 0);
+  }
+
+  if (block.type === "table") {
+    return (
+      block.captionChunks.length > 0 ||
+      block.cellChunks.some((row) => row.some((chunks) => chunks.length > 0))
+    );
+  }
+
+  if (block.type === "image") {
+    return Boolean(block.src || block.artifactKey || block.chunks.length > 0);
+  }
+
+  return block.chunks.length > 0;
+}
+
+function normalizedComparableTitle(value: string) {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
 }
 
 function formatDate(value: string) {

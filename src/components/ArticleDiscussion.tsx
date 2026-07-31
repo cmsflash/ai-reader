@@ -137,7 +137,7 @@ export function ArticleDiscussion({
         : null;
     const background = Array.from(
       document.querySelectorAll<HTMLElement>(
-        ".library-panel, .reader-panel, .selection-discuss-button",
+        ".library-panel, .reader-panel, .mobile-library-trigger, .library-scrim, .selection-discuss-button",
       ),
     );
     const previousInert = background.map((element) =>
