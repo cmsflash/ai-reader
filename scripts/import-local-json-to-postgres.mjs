@@ -135,7 +135,7 @@ for (const article of store.articles) {
         thumbnail_url,
         preview_version
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::timestamptz, $10, $11, $12, $13, $14, $15, $16::timestamptz, $17, $18, $19::jsonb, $20, $21, 1)
+      VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::timestamptz, $10, $11, $12, $13, $14, $15, $16::timestamptz, $17, $18, $19::jsonb, $20, $21, 2)
       ON CONFLICT (id) DO UPDATE SET
         owner_email = EXCLUDED.owner_email,
         title = EXCLUDED.title,

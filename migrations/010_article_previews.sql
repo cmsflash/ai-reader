@@ -33,7 +33,7 @@ SET
           OR LOWER(BTRIM(preview_block.value->>'text')) ~
             '^[^.!?]{1,80} (is|was) (the|a|an) (chief|vice president|vp|president|director|professor|researcher|writer|editor|founder|co-founder)'
           OR LOWER(BTRIM(preview_block.value->>'text')) ~
-            '^[^.!?]{1,80} (received|earned|holds?) (his|her|their|a) (ph\\.?d|doctorate|master)'
+            '^[^.!?]{1,80} (received|earned|holds?) (his|her|their|a) (ph\.?d|doctorate|master)'
         )
       ORDER BY
         CASE
@@ -74,5 +74,5 @@ SET
       image_block.position
     LIMIT 1
   ),
-  preview_version = 1
-WHERE target.preview_version < 1;
+  preview_version = 2
+WHERE target.preview_version < 2;

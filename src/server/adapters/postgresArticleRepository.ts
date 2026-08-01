@@ -252,7 +252,7 @@ export class PostgresArticleRepository implements ArticleRepository {
           preview_version,
           content_fingerprint
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::timestamptz, $10, $11, $12, $13, $14, $15, $16::timestamptz, $17, $18, $19::jsonb, $20, $21, 1, $22)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::timestamptz, $10, $11, $12, $13, $14, $15, $16::timestamptz, $17, $18, $19::jsonb, $20, $21, 2, $22)
         ON CONFLICT DO NOTHING
         RETURNING ${articleColumns}
       `,
