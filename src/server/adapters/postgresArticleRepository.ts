@@ -404,7 +404,7 @@ export class PostgresArticleRepository implements ArticleRepository {
             ELSE NULL
           END,
           folder_id = CASE
-            WHEN $5::boolean THEN $6
+            WHEN $5::boolean THEN $6::text
             WHEN $4::boolean IS FALSE AND EXISTS (
               SELECT 1
               FROM reading_folders AS current_folder
@@ -430,11 +430,11 @@ export class PostgresArticleRepository implements ArticleRepository {
           AND owner_email = $2
           AND (
             NOT $5::boolean
-            OR $6 IS NULL
+            OR $6::text IS NULL
             OR EXISTS (
               SELECT 1
               FROM reading_folders
-              WHERE owner_email = $2 AND id = $6
+              WHERE owner_email = $2 AND id = $6::text
             )
           )
         RETURNING id, folder_id, archived_at, updated_at

@@ -229,6 +229,54 @@ test("creates owner-scoped folders and atomically archives and moves an article"
   assert.doesNotMatch(queries[2].statement, /content_html|text_content|blocks/);
 });
 
+test("null folder updates explicitly type the optional folder parameter", async () => {
+  const queries = [];
+  const repository = new PostgresArticleRepository({
+    async query(statement, params) {
+      const normalized = normalizeQuery(statement);
+      queries.push({ statement: normalized, params });
+
+      if (normalized.startsWith("UPDATE articles")) {
+        return [
+          {
+            id: "article-1",
+            folder_id: "folder-default",
+            archived_at: params[2],
+            updated_at: params[2],
+          },
+        ];
+      }
+
+      throw new Error(`Unexpected query: ${normalized}`);
+    },
+  });
+
+  const archived = await repository.updateOrganization(
+    "article-1",
+    " Reader@Example.com ",
+    { archived: true },
+  );
+  const movedToInbox = await repository.updateOrganization(
+    "article-1",
+    " Reader@Example.com ",
+    { folderId: null },
+  );
+
+  assert.equal(queries.length, 2);
+  assert.equal(queries[0].params[3], true);
+  assert.equal(queries[0].params[4], false);
+  assert.equal(queries[0].params[5], null);
+  assert.equal(queries[1].params[3], null);
+  assert.equal(queries[1].params[4], true);
+  assert.equal(queries[1].params[5], null);
+  assert.match(queries[0].statement, /WHEN \$5::boolean THEN \$6::text/);
+  assert.match(queries[0].statement, /OR \$6::text IS NULL/);
+  assert.match(queries[0].statement, /id = \$6::text/);
+  assert.equal(archived?.folderId, "folder-default");
+  assert.ok(archived?.archivedAt);
+  assert.equal(movedToInbox?.folderId, "folder-default");
+});
+
 function normalizeQuery(statement) {
   return statement.replace(/\s+/g, " ").trim();
 }
