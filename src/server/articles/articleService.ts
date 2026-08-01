@@ -13,7 +13,10 @@ import type {
 } from "@/server/articles/articleDeduplication";
 import { getArticleRepository } from "@/server/runtime/articleRepository";
 import { dismissLocalImportsForArticle } from "@/server/integrations/importRecords";
-import type { ArticleProgressPatch } from "@/server/ports/articleRepository";
+import type {
+  ArticleOrganizationPatch,
+  ArticleProgressPatch,
+} from "@/server/ports/articleRepository";
 import { toArticleSummary } from "@/server/ports/articleRepository";
 import type { Article } from "@/lib/types";
 
@@ -24,6 +27,24 @@ type ImportedArticleOptions = {
 
 export async function listArticleSummaries(ownerEmail: string) {
   return getArticleRepository().list(ownerEmail);
+}
+
+export async function listArticleFolders(ownerEmail: string) {
+  return getArticleRepository().listFolders(ownerEmail);
+}
+
+export async function createArticleFolder(name: string, ownerEmail: string) {
+  const folderName = name.normalize("NFKC").replace(/\s+/gu, " ").trim();
+
+  if (!folderName) {
+    throw new Error("Folder name is required.");
+  }
+
+  if (folderName.length > 80) {
+    throw new Error("Folder names must be 80 characters or fewer.");
+  }
+
+  return getArticleRepository().createFolder(folderName, ownerEmail);
 }
 
 export async function getSavedArticle(id: string, ownerEmail: string) {
@@ -102,6 +123,18 @@ export async function updateSavedArticleProgress(
     article,
     summary: toArticleSummary(article),
   };
+}
+
+export async function updateSavedArticleOrganization(
+  id: string,
+  ownerEmail: string,
+  organization: ArticleOrganizationPatch,
+) {
+  return getArticleRepository().updateOrganization(
+    id,
+    ownerEmail,
+    organization,
+  );
 }
 
 export async function advanceSavedArticleProgress(

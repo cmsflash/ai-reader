@@ -1,7 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { Article, ArticleStore, ReadingProgress } from "@/lib/types";
+import type {
+  Article,
+  ArticleFolder,
+  ArticleStore,
+  ReadingProgress,
+} from "@/lib/types";
 import {
+  type ArticleOrganizationPatch,
+  type ArticleOrganizationResult,
   type ArticleProgressPatch,
   type ArticleRepository,
   toArticleSummary,
@@ -13,6 +21,10 @@ type LocalJsonArticleRepositoryOptions = {
 };
 
 type StoredArticle = Article & {
+  ownerEmail?: string;
+};
+
+type StoredFolder = ArticleFolder & {
   ownerEmail?: string;
 };
 
@@ -31,6 +43,83 @@ export class LocalJsonArticleRepository implements ArticleRepository {
 
   async list(ownerEmail: string) {
     return (await this.listArticles(ownerEmail)).map(toArticleSummary);
+  }
+
+  async listFolders(ownerEmail: string) {
+    const store = await this.readCurrentStore();
+    return ((store.folders ?? []) as StoredFolder[])
+      .filter((folder) => folderBelongsToOwner(folder, ownerEmail))
+      .map(({ id, name, slug, isArchive, createdAt, updatedAt }) => ({
+        id,
+        name,
+        slug,
+        isArchive: Boolean(isArchive),
+        createdAt,
+        updatedAt,
+      }))
+      .sort((left, right) =>
+        left.name.localeCompare(right.name, undefined, {
+          sensitivity: "base",
+          numeric: true,
+        }),
+      );
+  }
+
+  async createFolder(name: string, ownerEmail: string) {
+    const folderName = cleanFolderName(name);
+    const normalizedName = normalizeFolderName(folderName);
+
+    if (!normalizedName) {
+      throw new Error("Folder name is required.");
+    }
+
+    return this.mutateStore((store) => {
+      const folders = (store.folders ?? []) as StoredFolder[];
+      const existing = folders.find(
+        (folder) =>
+          folderBelongsToOwner(folder, ownerEmail) &&
+          normalizeFolderName(folder.name) === normalizedName,
+      );
+
+      if (existing) {
+        return {
+          value: {
+            id: existing.id,
+            name: existing.name,
+            slug: existing.slug,
+            isArchive: Boolean(existing.isArchive),
+            createdAt: existing.createdAt,
+            updatedAt: existing.updatedAt,
+          },
+        };
+      }
+
+      const now = new Date().toISOString();
+      const folder: StoredFolder = {
+        id: `folder-${randomUUID()}`,
+        name: folderName,
+        slug: folderSlug(folderName),
+        isArchive: false,
+        createdAt: now,
+        updatedAt: now,
+        ownerEmail: normalizeOwnerEmail(ownerEmail),
+      };
+
+      return {
+        store: {
+          ...store,
+          folders: [...folders, folder],
+        },
+        value: {
+          id: folder.id,
+          name: folder.name,
+          slug: folder.slug,
+          isArchive: folder.isArchive,
+          createdAt: folder.createdAt,
+          updatedAt: folder.updatedAt,
+        },
+      };
+    });
   }
 
   async listArticles(ownerEmail: string) {
@@ -219,6 +308,76 @@ export class LocalJsonArticleRepository implements ArticleRepository {
     });
   }
 
+  async updateOrganization(
+    id: string,
+    ownerEmail: string,
+    organization: ArticleOrganizationPatch,
+  ) {
+    return this.mutateStore((store) => {
+      const articleIndex = store.articles.findIndex(
+        (article) =>
+          article.id === id && articleBelongsToOwner(article, ownerEmail),
+      );
+
+      if (articleIndex === -1) {
+        return { value: null };
+      }
+
+      const hasFolderId = Object.hasOwn(organization, "folderId");
+      const folderId = organization.folderId ?? null;
+
+      if (
+        hasFolderId &&
+        folderId &&
+        !((store.folders ?? []) as StoredFolder[]).some(
+          (folder) =>
+            folder.id === folderId &&
+            folderBelongsToOwner(folder, ownerEmail),
+        )
+      ) {
+        throw new Error("Folder not found.");
+      }
+
+      const article = store.articles[articleIndex];
+      const now = new Date().toISOString();
+      const ownerFolders = ((store.folders ?? []) as StoredFolder[]).filter(
+        (folder) => folderBelongsToOwner(folder, ownerEmail),
+      );
+      const currentFolder = ownerFolders.find(
+        (folder) => folder.id === article.folderId,
+      );
+      const defaultFolder =
+        ownerFolders.find(
+          (folder) => !folder.isArchive && folder.slug === "default",
+        ) ?? ownerFolders.find((folder) => !folder.isArchive);
+      const restoredFolderId =
+        organization.archived === false && currentFolder?.isArchive
+          ? defaultFolder?.id
+          : article.folderId;
+      const updatedArticle: Article = {
+        ...article,
+        updatedAt: now,
+        folderId: hasFolderId ? folderId || undefined : restoredFolderId,
+        archivedAt:
+          typeof organization.archived === "boolean"
+            ? organization.archived
+              ? article.archivedAt ?? now
+              : undefined
+            : article.archivedAt,
+      };
+      const nextArticles = [...store.articles];
+      nextArticles[articleIndex] = updatedArticle;
+
+      return {
+        store: {
+          ...store,
+          articles: nextArticles,
+        },
+        value: organizationResult(updatedArticle),
+      };
+    });
+  }
+
   async deleteById(id: string, ownerEmail: string) {
     return this.mutateStore((store) => {
       const nextArticles = store.articles.filter(
@@ -299,8 +458,39 @@ function articleBelongsToOwner(article: Article, ownerEmail: string) {
   return (article as StoredArticle).ownerEmail === normalizeOwnerEmail(ownerEmail);
 }
 
+function folderBelongsToOwner(folder: StoredFolder, ownerEmail: string) {
+  return folder.ownerEmail === normalizeOwnerEmail(ownerEmail);
+}
+
 function normalizeOwnerEmail(ownerEmail: string) {
   return ownerEmail.trim().toLowerCase();
+}
+
+function cleanFolderName(name: string) {
+  return name.normalize("NFKC").replace(/\s+/gu, " ").trim();
+}
+
+function normalizeFolderName(name: string) {
+  return cleanFolderName(name).toLocaleLowerCase();
+}
+
+function folderSlug(name: string) {
+  return (
+    name
+      .normalize("NFKD")
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, "-")
+      .replace(/^-+|-+$/gu, "") || "folder"
+  );
+}
+
+function organizationResult(article: Article): ArticleOrganizationResult {
+  return {
+    id: article.id,
+    folderId: article.folderId ?? null,
+    archivedAt: article.archivedAt ?? null,
+    updatedAt: article.updatedAt,
+  };
 }
 
 function emptyStore(): ArticleStore {

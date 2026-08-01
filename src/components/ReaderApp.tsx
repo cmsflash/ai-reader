@@ -1,13 +1,20 @@
 "use client";
 
 import {
+  Archive,
+  ArrowUpDown,
   ChevronLeft,
+  ChevronRight,
   BookOpen,
+  Check,
   CloudDownload,
   Download,
   FileText,
+  Folder,
+  FolderInput,
   Link as LinkIcon,
   MessageCircle,
+  MoreHorizontal,
   Pause,
   Play,
   Plus,
@@ -19,7 +26,12 @@ import {
   Volume2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, MouseEvent as ReactMouseEvent } from "react";
+import type {
+  CSSProperties,
+  FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+} from "react";
 import {
   ArticleDiscussion,
   type ArticleDiscussionScope,
@@ -30,15 +42,37 @@ import {
   type AnnotatedBlock,
   type SentenceSegment,
 } from "@/lib/sentences";
-import type { Article, ArticleSummary, SourceType } from "@/lib/types";
+import type {
+  Article,
+  ArticleFolder,
+  ArticleSummary,
+  SourceType,
+} from "@/lib/types";
 
 type ArticleListResponse = {
   articles: ArticleSummary[];
 };
 
+type FolderListResponse = {
+  folders: ArticleFolder[];
+};
+
+type FolderResponse = {
+  folder: ArticleFolder;
+};
+
 type ArticleResponse = {
   article: Article;
   summary?: ArticleSummary;
+};
+
+type ArticleOrganizationResponse = {
+  organization: {
+    id: string;
+    folderId: string | null;
+    archivedAt: string | null;
+    updatedAt: string;
+  };
 };
 
 type ImportResponse = {
@@ -103,6 +137,36 @@ type IntegrationSyncResponse = {
 };
 
 type IntegrationProvider = "instapaper" | "dropbox";
+
+type LibrarySortMode =
+  | "saved-desc"
+  | "saved-asc"
+  | "read-desc"
+  | "title-asc"
+  | "duration-asc"
+  | "duration-desc";
+
+type LibraryLocation = "all" | "inbox" | "archive" | `folder:${string}`;
+
+type ArticleActionState = {
+  articleId: string;
+  left: number;
+  top: number;
+  view: "actions" | "move";
+};
+
+type OrganizationPatch = {
+  archived?: boolean;
+  folderId?: string | null;
+};
+
+type OrganizationNotice = {
+  message: string;
+  undo?: {
+    articleId: string;
+    patch: OrganizationPatch;
+  };
+};
 
 const integrationBatchSize = 5;
 const wholeArticleDiscussionScope: ArticleDiscussionScope = { kind: "whole" };
@@ -221,6 +285,7 @@ export function ReaderApp() {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<string | null>("Loading library...");
   const [error, setError] = useState<string | null>(null);
+  const [folderError, setFolderError] = useState<string | null>(null);
   const [articleLoadError, setArticleLoadError] = useState<string | null>(null);
   const [articleLoadAttempt, setArticleLoadAttempt] = useState(0);
   const [isImporting, setIsImporting] = useState(false);
@@ -246,6 +311,19 @@ export function ReaderApp() {
   const [selectionDiscussionAction, setSelectionDiscussionAction] =
     useState<SelectionDiscussionAction | null>(null);
   const [appView, setAppView] = useState<AppView>("library");
+  const [folders, setFolders] = useState<ArticleFolder[]>([]);
+  const [libraryLocation, setLibraryLocation] =
+    useState<LibraryLocation>("all");
+  const [librarySort, setLibrarySort] =
+    useState<LibrarySortMode>("saved-desc");
+  const [articleActions, setArticleActions] =
+    useState<ArticleActionState | null>(null);
+  const [articleActionBusy, setArticleActionBusy] = useState(false);
+  const [articleActionError, setArticleActionError] = useState<string | null>(
+    null,
+  );
+  const [organizationNotice, setOrganizationNotice] =
+    useState<OrganizationNotice | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const articleBodyRef = useRef<HTMLElement | null>(null);
@@ -270,6 +348,7 @@ export function ReaderApp() {
   const restoredArticleIdRef = useRef<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+  const articleActionReturnFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const metadata = readHistoryMetadata();
@@ -291,19 +370,38 @@ export function ReaderApp() {
   const selectedPendingImport =
     pendingImports.find((pendingImport) => pendingImport.id === selectedId) ??
     null;
+  const folderById = useMemo(
+    () => new Map(folders.map((folder) => [folder.id, folder])),
+    [folders],
+  );
+  const activeArticleCount = useMemo(
+    () => articles.filter((item) => !item.archivedAt).length,
+    [articles],
+  );
+  const visibleArticles = useMemo(
+    () => filterAndSortArticles(articles, libraryLocation, librarySort),
+    [articles, libraryLocation, librarySort],
+  );
+  const showPendingImports =
+    libraryLocation === "all" || libraryLocation === "inbox";
   const libraryItems = useMemo(
     () => [
-      ...pendingImports.map((pendingImport) => ({
-        kind: "pending" as const,
-        pendingImport,
-      })),
-      ...articles.map((articleSummary) => ({
+      ...(showPendingImports
+        ? pendingImports.map((pendingImport) => ({
+            kind: "pending" as const,
+            pendingImport,
+          }))
+        : []),
+      ...visibleArticles.map((articleSummary) => ({
         kind: "article" as const,
         articleSummary,
       })),
     ],
-    [articles, pendingImports],
+    [pendingImports, showPendingImports, visibleArticles],
   );
+  const actionArticle = articleActions
+    ? (articles.find((item) => item.id === articleActions.articleId) ?? null)
+    : null;
 
   useEffect(() => {
     articleIdRef.current = selectedId;
@@ -364,6 +462,13 @@ export function ReaderApp() {
   }, [selectedId]);
 
   useEffect(() => {
+    if (appView !== "library") {
+      setArticleActions(null);
+      setArticleActionError(null);
+    }
+  }, [appView]);
+
+  useEffect(() => {
     if (!selectionDiscussionAction) {
       return;
     }
@@ -413,6 +518,23 @@ export function ReaderApp() {
     }
   }, []);
 
+  const loadFolders = useCallback(async () => {
+    try {
+      const data = await requestJson<FolderListResponse>("/api/folders");
+      setFolders(data.folders);
+      setFolderError(null);
+    } catch (loadError) {
+      setFolderError(messageFromError(loadError));
+    }
+  }, []);
+
+  const refreshLibrary = useCallback(
+    async (showLoading = false) => {
+      await Promise.all([loadArticles(showLoading), loadFolders()]);
+    },
+    [loadArticles, loadFolders],
+  );
+
   const loadIntegrationStatus = useCallback(async () => {
     try {
       const data = await requestJson<IntegrationStatusResponse>(
@@ -450,11 +572,8 @@ export function ReaderApp() {
   }, []);
 
   useEffect(() => {
-    void loadArticles(true);
-    const interval = window.setInterval(() => void loadArticles(false), 15000);
-
-    return () => window.clearInterval(interval);
-  }, [loadArticles]);
+    void refreshLibrary(true);
+  }, [refreshLibrary]);
 
   useEffect(() => {
     void loadIntegrationStatus();
@@ -877,31 +996,269 @@ export function ReaderApp() {
     setAppView("reader");
   }, []);
 
-  const handleLibraryItemSelect = useCallback(
-    (event: ReactMouseEvent<HTMLElement>) => {
-      const target = event.target;
+  const closeArticleActions = useCallback((restoreFocus = true) => {
+    setArticleActions(null);
+    setArticleActionError(null);
 
-      if (!(target instanceof Element)) {
-        return;
-      }
+    if (restoreFocus) {
+      window.requestAnimationFrame(() =>
+        articleActionReturnFocusRef.current?.focus({ preventScroll: true }),
+      );
+    }
+  }, []);
 
-      const row = target.closest<HTMLButtonElement>("[data-article-id]");
-
-      if (!row || !event.currentTarget.contains(row)) {
-        return;
-      }
-
-      const articleId = row.dataset.articleId;
-
-      if (!articleId) {
-        return;
-      }
-
-      articleIdRef.current = articleId;
-      showReader(articleId);
+  const openArticleActions = useCallback(
+    (
+      articleId: string,
+      left: number,
+      top: number,
+      returnFocus: HTMLElement,
+    ) => {
+      articleActionReturnFocusRef.current = returnFocus;
+      setArticleActionError(null);
+      setArticleActions({ articleId, left, top, view: "actions" });
     },
-    [showReader],
+    [],
   );
+
+  const showMoveActions = useCallback(() => {
+    setArticleActionError(null);
+    setArticleActions((current) =>
+      current ? { ...current, view: "move" } : current,
+    );
+  }, []);
+
+  const updateOrganization = useCallback(
+    async (articleId: string, organization: OrganizationPatch) => {
+      const data = await requestJson<ArticleOrganizationResponse>(
+        `/api/articles/${articleId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ organization }),
+        },
+      );
+
+      const updatedOrganization = data.organization;
+      setArticles((current) =>
+        current.map((item) =>
+          item.id === articleId
+            ? {
+                ...item,
+                folderId: updatedOrganization.folderId ?? undefined,
+                archivedAt: updatedOrganization.archivedAt ?? undefined,
+                updatedAt: updatedOrganization.updatedAt,
+              }
+            : item,
+        ),
+      );
+      setArticle((current) =>
+        current?.id === articleId
+          ? {
+              ...current,
+              folderId: updatedOrganization.folderId ?? undefined,
+              archivedAt: updatedOrganization.archivedAt ?? undefined,
+              updatedAt: updatedOrganization.updatedAt,
+            }
+          : current,
+      );
+      return updatedOrganization;
+    },
+    [],
+  );
+
+  const focusAfterLibraryRemoval = useCallback(
+    (articleId: string) => {
+      const currentIndex = visibleArticles.findIndex(
+        (item) => item.id === articleId,
+      );
+      const nextItem =
+        visibleArticles[currentIndex + 1] ??
+        visibleArticles[currentIndex - 1] ??
+        null;
+
+      window.requestAnimationFrame(() => {
+        const target = nextItem
+          ? Array.from(
+              document.querySelectorAll<HTMLElement>("[data-article-open-id]"),
+            ).find(
+              (element) => element.dataset.articleOpenId === nextItem.id,
+            )
+          : null;
+        (target ?? libraryHeadingRef.current)?.focus({ preventScroll: true });
+      });
+    },
+    [visibleArticles],
+  );
+
+  const handleArchiveFromActions = useCallback(async () => {
+    if (!actionArticle) {
+      return;
+    }
+
+    const wasArchived = Boolean(actionArticle.archivedAt);
+    const currentFolder = actionArticle.folderId
+      ? folderById.get(actionArticle.folderId)
+      : undefined;
+    const defaultFolder =
+      folders.find(
+        (folder) => !folder.isArchive && folder.slug === "default",
+      ) ?? folders.find((folder) => !folder.isArchive);
+    const organization: OrganizationPatch = wasArchived
+      ? {
+          archived: false,
+          ...(currentFolder?.isArchive
+            ? { folderId: defaultFolder?.id ?? null }
+            : {}),
+        }
+      : { archived: true };
+    const undoPatch: OrganizationPatch = {
+      archived: wasArchived,
+      ...(wasArchived && currentFolder?.isArchive
+        ? { folderId: actionArticle.folderId ?? null }
+        : {}),
+    };
+    setArticleActionBusy(true);
+    setArticleActionError(null);
+
+    try {
+      await updateOrganization(actionArticle.id, organization);
+      setOrganizationNotice({
+        message: wasArchived
+          ? `Restored “${actionArticle.title}”.`
+          : `Archived “${actionArticle.title}”.`,
+        undo: {
+          articleId: actionArticle.id,
+          patch: undoPatch,
+        },
+      });
+      closeArticleActions(false);
+      focusAfterLibraryRemoval(actionArticle.id);
+    } catch (actionError) {
+      setArticleActionError(messageFromError(actionError));
+    } finally {
+      setArticleActionBusy(false);
+    }
+  }, [
+    actionArticle,
+    closeArticleActions,
+    focusAfterLibraryRemoval,
+    folderById,
+    folders,
+    updateOrganization,
+  ]);
+
+  const moveArticleToFolder = useCallback(
+    async (folderId: string | null, destinationName?: string) => {
+      if (!actionArticle) {
+        return false;
+      }
+
+      const previousFolderId = actionArticle.folderId ?? null;
+      const movingRestores = Boolean(actionArticle.archivedAt);
+
+      if (previousFolderId === folderId && !movingRestores) {
+        closeArticleActions();
+        return true;
+      }
+
+      setArticleActionBusy(true);
+      setArticleActionError(null);
+
+      try {
+        await updateOrganization(actionArticle.id, {
+          folderId,
+          ...(movingRestores ? { archived: false } : {}),
+        });
+        const destination = folderId
+          ? (destinationName ?? folderById.get(folderId)?.name ?? "folder")
+          : "Inbox";
+        setOrganizationNotice({
+          message: `Moved “${actionArticle.title}” to ${destination}.`,
+          undo: {
+            articleId: actionArticle.id,
+            patch: {
+              folderId: previousFolderId,
+              ...(movingRestores ? { archived: true } : {}),
+            },
+          },
+        });
+        const movedOutOfCurrentView =
+          (libraryLocation === "inbox" && folderId !== null) ||
+          (libraryLocation === "archive" && movingRestores) ||
+          (libraryLocation.startsWith("folder:") &&
+            libraryLocation !== `folder:${folderId}`);
+        closeArticleActions(!movedOutOfCurrentView);
+
+        if (movedOutOfCurrentView) {
+          focusAfterLibraryRemoval(actionArticle.id);
+        }
+        return true;
+      } catch (actionError) {
+        setArticleActionError(messageFromError(actionError));
+        return false;
+      } finally {
+        setArticleActionBusy(false);
+      }
+    },
+    [
+      actionArticle,
+      closeArticleActions,
+      focusAfterLibraryRemoval,
+      folderById,
+      libraryLocation,
+      updateOrganization,
+    ],
+  );
+
+  const createFolderAndMove = useCallback(
+    async (name: string) => {
+      setArticleActionBusy(true);
+      setArticleActionError(null);
+
+      try {
+        const data = await requestJson<FolderResponse>("/api/folders", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ name }),
+        });
+        setFolders((current) =>
+          current.some((folder) => folder.id === data.folder.id)
+            ? current
+            : [...current, data.folder].sort(compareFolders),
+        );
+        return await moveArticleToFolder(data.folder.id, data.folder.name);
+      } catch (actionError) {
+        setArticleActionError(messageFromError(actionError));
+        return false;
+      } finally {
+        setArticleActionBusy(false);
+      }
+    },
+    [moveArticleToFolder],
+  );
+
+  const undoOrganizationChange = useCallback(async () => {
+    const undo = organizationNotice?.undo;
+
+    if (!undo) {
+      return;
+    }
+
+    setOrganizationNotice({ message: "Undoing…" });
+
+    try {
+      await updateOrganization(undo.articleId, undo.patch);
+      setOrganizationNotice({ message: "Change undone." });
+    } catch (undoError) {
+      setOrganizationNotice(null);
+      setError(messageFromError(undoError));
+    }
+  }, [organizationNotice?.undo, updateOrganization]);
 
   useEffect(() => {
     if (appView === "library" || discussionOpen) {
@@ -1255,33 +1612,65 @@ export function ReaderApp() {
       return;
     }
 
-    const deletingId = selectedId;
     stopSpeaking();
     setError(null);
 
     try {
-      await requestJson<{ ok: boolean }>(`/api/articles/${deletingId}`, {
-        method: "DELETE",
-      });
-
-      unavailableArticleIdsRef.current.add(deletingId);
-      persistHistoryMetadata(
-        resolvedHistoryIdsRef.current,
-        unavailableArticleIdsRef.current,
-      );
-      setArticles((current) =>
-        current.filter((item) => item.id !== deletingId),
-      );
-      if (articleIdRef.current === deletingId) {
-        articleIdRef.current = null;
-        setSelectedId(null);
-        setArticle(null);
-        replaceWithLibrary();
-      }
+      await deleteArticleById(selectedId);
     } catch (deleteError) {
-      if (articleIdRef.current === deletingId) {
-        setError(messageFromError(deleteError));
-      }
+      setError(messageFromError(deleteError));
+    }
+  }
+
+  async function handleDeleteArticleFromActions() {
+    if (!actionArticle) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Permanently delete “${actionArticle.title}”?`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setArticleActionBusy(true);
+    setArticleActionError(null);
+
+    try {
+      await deleteArticleById(actionArticle.id);
+      closeArticleActions(false);
+      focusAfterLibraryRemoval(actionArticle.id);
+      setOrganizationNotice({
+        message: `Deleted “${actionArticle.title}”.`,
+      });
+    } catch (deleteError) {
+      setArticleActionError(messageFromError(deleteError));
+    } finally {
+      setArticleActionBusy(false);
+    }
+  }
+
+  async function deleteArticleById(deletingId: string) {
+    await requestJson<{ ok: boolean }>(`/api/articles/${deletingId}`, {
+      method: "DELETE",
+    });
+
+    unavailableArticleIdsRef.current.add(deletingId);
+    persistHistoryMetadata(
+      resolvedHistoryIdsRef.current,
+      unavailableArticleIdsRef.current,
+    );
+    setArticles((current) =>
+      current.filter((item) => item.id !== deletingId),
+    );
+
+    if (articleIdRef.current === deletingId) {
+      articleIdRef.current = null;
+      setSelectedId(null);
+      setArticle(null);
+      replaceWithLibrary();
     }
   }
 
@@ -1321,7 +1710,10 @@ export function ReaderApp() {
               <div>
                 <h1>AI Reader</h1>
                 <p>
-                  {libraryCountLabel(articles.length, pendingImports.length)}
+                  {libraryCountLabel(
+                    activeArticleCount,
+                    pendingImports.length,
+                  )}
                 </p>
               </div>
             </div>
@@ -1331,7 +1723,7 @@ export function ReaderApp() {
                 type="button"
                 title="Refresh library"
                 aria-label="Refresh library"
-                onClick={() => void loadArticles(true)}
+                onClick={() => void refreshLibrary(true)}
               >
                 <RefreshCw size={18} />
               </button>
@@ -1372,25 +1764,82 @@ export function ReaderApp() {
                 </h2>
               </div>
               <span>
-                {libraryCountLabel(articles.length, pendingImports.length)}
+                {libraryCountLabel(
+                  visibleArticles.length,
+                  showPendingImports ? pendingImports.length : 0,
+                )}
               </span>
             </header>
 
-            {(status || error) && (
-              <div className={error ? "notice error" : "notice"} role="status">
-                {error ?? status}
+            <div className="library-controls" aria-label="Library controls">
+              <label className="library-select-control">
+                <Folder size={16} aria-hidden="true" />
+                <span className="visually-hidden">Show collection</span>
+                <select
+                  value={libraryLocation}
+                  onChange={(event) =>
+                    setLibraryLocation(event.target.value as LibraryLocation)
+                  }
+                >
+                  <option value="all">All articles</option>
+                  <option value="inbox">Inbox</option>
+                  {folders
+                    .filter((folder) => !folder.isArchive)
+                    .map((folder) => (
+                    <option key={folder.id} value={`folder:${folder.id}`}>
+                      {folder.name}
+                    </option>
+                    ))}
+                  <option value="archive">Archive</option>
+                </select>
+              </label>
+              <label className="library-select-control">
+                <ArrowUpDown size={16} aria-hidden="true" />
+                <span className="visually-hidden">Sort articles</span>
+                <select
+                  value={librarySort}
+                  onChange={(event) =>
+                    setLibrarySort(event.target.value as LibrarySortMode)
+                  }
+                >
+                  <option value="saved-desc">Newest saved</option>
+                  <option value="saved-asc">Oldest saved</option>
+                  <option value="read-desc">Recently read</option>
+                  <option value="title-asc">Title A–Z</option>
+                  <option value="duration-asc">Shortest first</option>
+                  <option value="duration-desc">Longest first</option>
+                </select>
+              </label>
+            </div>
+
+            {(status || error || folderError) && (
+              <div
+                className={error || folderError ? "notice error" : "notice"}
+                role="status"
+              >
+                {error ?? folderError ?? status}
               </div>
             )}
 
-            <nav
+            {organizationNotice ? (
+              <div className="notice organization-notice" role="status">
+                <span>{organizationNotice.message}</span>
+                {organizationNotice.undo ? (
+                  <button type="button" onClick={undoOrganizationChange}>
+                    Undo
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
+            <section
               className="article-list"
               aria-labelledby="library-index-title"
-              onClick={handleLibraryItemSelect}
             >
               {libraryItems.length === 0 ? (
                 <div className="empty-library">
                   <FileText size={24} />
-                  <span>Use Add to save your first article.</span>
+                  <span>{emptyLibraryMessage(libraryLocation)}</span>
                 </div>
               ) : (
                 libraryItems.map((item) =>
@@ -1399,17 +1848,25 @@ export function ReaderApp() {
                       key={item.pendingImport.id}
                       pendingImport={item.pendingImport}
                       selected={item.pendingImport.id === selectedId}
+                      onOpen={() => showReader(item.pendingImport.id)}
                     />
                   ) : (
                     <ArticleRow
                       key={item.articleSummary.id}
                       item={item.articleSummary}
                       selected={item.articleSummary.id === selectedId}
+                      folderName={
+                        item.articleSummary.folderId
+                          ? folderById.get(item.articleSummary.folderId)?.name
+                          : undefined
+                      }
+                      onOpen={() => showReader(item.articleSummary.id)}
+                      onOpenActions={openArticleActions}
                     />
                   ),
                 )
               )}
-            </nav>
+            </section>
           </div>
         </section>
       ) : null}
@@ -1936,6 +2393,33 @@ export function ReaderApp() {
         </section>
       ) : null}
 
+      {appView === "library" && actionArticle && articleActions ? (
+        <ArticleActionsDialog
+          article={actionArticle}
+          folders={folders.filter((folder) => !folder.isArchive)}
+          currentFolderName={
+            actionArticle.folderId
+              ? folderById.get(actionArticle.folderId)?.name
+              : undefined
+          }
+          position={{ left: articleActions.left, top: articleActions.top }}
+          view={articleActions.view}
+          busy={articleActionBusy}
+          error={articleActionError}
+          onClose={() => closeArticleActions()}
+          onShowActions={() =>
+            setArticleActions((current) =>
+              current ? { ...current, view: "actions" } : current,
+            )
+          }
+          onShowMove={showMoveActions}
+          onArchive={() => void handleArchiveFromActions()}
+          onMove={(folderId) => void moveArticleToFolder(folderId)}
+          onCreateFolder={(name) => createFolderAndMove(name)}
+          onDelete={() => void handleDeleteArticleFromActions()}
+        />
+      ) : null}
+
       {appView === "reader" && selectionDiscussionAction && !discussionOpen ? (
         <button
           className="selection-discuss-button"
@@ -1977,66 +2461,446 @@ export function ReaderApp() {
 function ArticleRow({
   item,
   selected,
+  folderName,
+  onOpen,
+  onOpenActions,
 }: {
   item: ArticleSummary;
   selected: boolean;
+  folderName?: string;
+  onOpen: () => void;
+  onOpenActions: (
+    articleId: string,
+    left: number,
+    top: number,
+    returnFocus: HTMLElement,
+  ) => void;
 }) {
+  const openButtonRef = useRef<HTMLButtonElement | null>(null);
+  const progressPercent = Math.round(progressRatio(item) * 100);
+
+  const openActionsFromKeyboard = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    if (
+      event.key !== "ContextMenu" &&
+      !(event.shiftKey && event.key === "F10")
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    onOpenActions(
+      item.id,
+      rect.right - 292,
+      rect.top + 42,
+      event.currentTarget,
+    );
+  };
+
+  const openActionsFromContextMenu = (
+    event: ReactMouseEvent<HTMLElement>,
+  ) => {
+    event.preventDefault();
+    const returnFocus = openButtonRef.current ?? event.currentTarget;
+    onOpenActions(
+      item.id,
+      event.clientX,
+      event.clientY,
+      returnFocus,
+    );
+  };
+
   return (
-    <button
-      type="button"
+    <article
       className={`article-row ${selected ? "selected" : ""}`}
       data-article-id={item.id}
+      onContextMenu={openActionsFromContextMenu}
     >
-      <span className="source-icon" aria-hidden="true">
-        {sourceGlyph(item.sourceType)}
-      </span>
-      <span className="article-row-main">
-        <span className="article-row-title">{item.title}</span>
-        <span className="article-row-meta">
-          {item.sourceUrl
-            ? sourceDomain(item.sourceUrl)
-            : sourceLabel(item.sourceType)}
-          {" · "}
-          {item.estimatedMinutes} min
-          {" · "}
-          {Math.round(progressRatio(item) * 100)}% read
+      <button
+        ref={openButtonRef}
+        className="article-row-open"
+        type="button"
+        data-article-open-id={item.id}
+        aria-current={selected ? "page" : undefined}
+        onClick={onOpen}
+        onKeyDown={openActionsFromKeyboard}
+      >
+        <span
+          className={`article-row-thumbnail thumbnail-${item.sourceType}`}
+          aria-hidden="true"
+        >
+          <span className="article-thumbnail-fallback">
+            {sourceGlyph(item.sourceType)}
+          </span>
+          {item.thumbnailUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element -- Reader thumbnails can come from arbitrary archived article URLs.
+            <img
+              src={proxiedImageSrc(item.thumbnailUrl, item.sourceUrl)}
+              alt=""
+              loading="lazy"
+              decoding="async"
+              onError={(event) => {
+                event.currentTarget.hidden = true;
+              }}
+            />
+          ) : null}
         </span>
-        <span className="mini-progress" aria-hidden="true">
-          <span style={{ width: `${progressRatio(item) * 100}%` }} />
+        <span className="article-row-main">
+          <span className="article-row-title">{item.title}</span>
+          <span className="article-row-meta">
+            {articleCardMeta(item, folderName)}
+          </span>
+          {item.excerpt ? (
+            <span className="article-row-excerpt">{item.excerpt}</span>
+          ) : null}
+          {progressPercent > 0 ? (
+            <span className="mini-progress" aria-hidden="true">
+              <span style={{ width: `${progressPercent}%` }} />
+            </span>
+          ) : null}
         </span>
-      </span>
-    </button>
+      </button>
+      <button
+        className="article-row-more"
+        type="button"
+        aria-label={`More actions for ${item.title}`}
+        aria-haspopup="dialog"
+        title="More actions"
+        onClick={(event) => {
+          event.stopPropagation();
+          const rect = event.currentTarget.getBoundingClientRect();
+          onOpenActions(
+            item.id,
+            rect.right - 292,
+            rect.bottom + 6,
+            event.currentTarget,
+          );
+        }}
+      >
+        <MoreHorizontal size={20} />
+      </button>
+    </article>
   );
 }
 
 function PendingImportRow({
   pendingImport,
   selected,
+  onOpen,
 }: {
   pendingImport: PendingImport;
   selected: boolean;
+  onOpen: () => void;
 }) {
   return (
-    <button
-      type="button"
+    <article
       className={`article-row pending ${selected ? "selected" : ""}`}
       data-article-id={pendingImport.id}
       aria-busy="true"
     >
-      <span className="source-icon pending" aria-hidden="true">
-        <RefreshCw className="spin" size={16} />
-      </span>
-      <span className="article-row-main">
-        <span className="article-row-title">{pendingImport.title}</span>
-        <span className="article-row-meta">
-          {sourceLabel(pendingImport.sourceType)} · Parsing ·{" "}
-          {pendingImport.detail}
+      <button
+        className="article-row-open"
+        type="button"
+        data-article-open-id={pendingImport.id}
+        aria-current={selected ? "page" : undefined}
+        onClick={onOpen}
+      >
+        <span
+          className={`article-row-thumbnail thumbnail-${pendingImport.sourceType}`}
+          aria-hidden="true"
+        >
+          <RefreshCw className="spin" size={22} />
         </span>
-        <span className="mini-progress indeterminate" aria-hidden="true">
-          <span />
+        <span className="article-row-main">
+          <span className="article-row-title">{pendingImport.title}</span>
+          <span className="article-row-meta">
+            {sourceLabel(pendingImport.sourceType)} · Parsing ·{" "}
+            {pendingImport.detail}
+          </span>
+          <span className="mini-progress indeterminate" aria-hidden="true">
+            <span />
+          </span>
         </span>
-      </span>
-    </button>
+      </button>
+      <span className="article-row-action-spacer" aria-hidden="true" />
+    </article>
+  );
+}
+
+function ArticleActionsDialog({
+  article,
+  folders,
+  currentFolderName,
+  position,
+  view,
+  busy,
+  error,
+  onClose,
+  onShowActions,
+  onShowMove,
+  onArchive,
+  onMove,
+  onCreateFolder,
+  onDelete,
+}: {
+  article: ArticleSummary;
+  folders: ArticleFolder[];
+  currentFolderName?: string;
+  position: { left: number; top: number };
+  view: "actions" | "move";
+  busy: boolean;
+  error: string | null;
+  onClose: () => void;
+  onShowActions: () => void;
+  onShowMove: () => void;
+  onArchive: () => void;
+  onMove: (folderId: string | null) => void;
+  onCreateFolder: (name: string) => Promise<boolean>;
+  onDelete: () => void;
+}) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const closeRef = useRef(onClose);
+  const [newFolderName, setNewFolderName] = useState("");
+
+  useEffect(() => {
+    closeRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const panel = panelRef.current;
+    const focusFrame = window.requestAnimationFrame(() => {
+      panel
+        ?.querySelector<HTMLElement>("[data-action-autofocus]")
+        ?.focus({ preventScroll: true });
+    });
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (busy) {
+          return;
+        }
+
+        event.preventDefault();
+        closeRef.current();
+        return;
+      }
+
+      if (event.key !== "Tab" || !panel) {
+        return;
+      }
+
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable.at(-1) ?? first;
+
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [busy, view]);
+
+  const style = {
+    "--article-action-left": `${position.left}px`,
+    "--article-action-top": `${position.top}px`,
+  } as CSSProperties;
+
+  return (
+    <div
+      className="article-action-scrim"
+      onMouseDown={(event) => {
+        if (!busy && event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div
+        ref={panelRef}
+        className="article-action-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-busy={busy || undefined}
+        aria-labelledby="article-action-title"
+        style={style}
+      >
+        {view === "actions" ? (
+          <>
+            <header className="article-action-heading">
+              <div>
+                <span>Article actions</span>
+                <h2 id="article-action-title">{article.title}</h2>
+                <p>{currentFolderName ?? "Inbox"}</p>
+              </div>
+              <button
+                className="article-action-close"
+                type="button"
+                aria-label="Close article actions"
+                disabled={busy}
+                onClick={onClose}
+              >
+                ×
+              </button>
+            </header>
+            <div className="article-action-list">
+              <button
+                type="button"
+                data-action-autofocus
+                disabled={busy}
+                onClick={onArchive}
+              >
+                <Archive size={19} />
+                <span>
+                  <strong>{article.archivedAt ? "Restore" : "Archive"}</strong>
+                  <small>
+                    {article.archivedAt
+                      ? "Return this article to the library"
+                      : "Hide it from the active library"}
+                  </small>
+                </span>
+              </button>
+              <button type="button" disabled={busy} onClick={onShowMove}>
+                <FolderInput size={19} />
+                <span>
+                  <strong>Move to folder</strong>
+                  <small>{currentFolderName ?? "Inbox"}</small>
+                </span>
+                <ChevronRight className="article-action-chevron" size={17} />
+              </button>
+              <button
+                className="article-action-delete"
+                type="button"
+                disabled={busy}
+                onClick={onDelete}
+              >
+                <Trash2 size={19} />
+                <span>
+                  <strong>Delete permanently</strong>
+                  <small>Remove the AI Reader copy</small>
+                </span>
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <header className="article-action-heading move-heading">
+              <button
+                className="article-action-back"
+                type="button"
+                data-action-autofocus
+                aria-label="Back to article actions"
+                disabled={busy}
+                onClick={onShowActions}
+              >
+                <ChevronLeft size={19} />
+              </button>
+              <div>
+                <span>Organize</span>
+                <h2 id="article-action-title">Move to folder</h2>
+              </div>
+              <button
+                className="article-action-close"
+                type="button"
+                aria-label="Close article actions"
+                disabled={busy}
+                onClick={onClose}
+              >
+                ×
+              </button>
+            </header>
+            <div className="folder-choice-list">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onMove(null)}
+              >
+                <Folder size={18} />
+                <span>Inbox</span>
+                {!article.folderId ? <Check size={18} /> : null}
+              </button>
+              {folders.map((folder) => (
+                <button
+                  key={folder.id}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onMove(folder.id)}
+                >
+                  <Folder size={18} />
+                  <span>{folder.name}</span>
+                  {article.folderId === folder.id ? (
+                    <Check size={18} />
+                  ) : null}
+                </button>
+              ))}
+            </div>
+            <form
+              className="new-folder-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const name = newFolderName.trim();
+
+                if (name) {
+                  void onCreateFolder(name).then((created) => {
+                    if (created) {
+                      setNewFolderName("");
+                    }
+                  });
+                }
+              }}
+            >
+              <label htmlFor="new-article-folder">New folder</label>
+              <div>
+                <input
+                  id="new-article-folder"
+                  value={newFolderName}
+                  maxLength={80}
+                  placeholder="Folder name"
+                  disabled={busy}
+                  onChange={(event) => setNewFolderName(event.target.value)}
+                />
+                <button
+                  type="submit"
+                  disabled={busy || !newFolderName.trim()}
+                >
+                  Create & move
+                </button>
+              </div>
+            </form>
+          </>
+        )}
+        {busy ? (
+          <p className="article-action-status" role="status" aria-live="polite">
+            <RefreshCw className="spin" size={15} aria-hidden="true" />
+            Saving change…
+          </p>
+        ) : null}
+        {error ? (
+          <p className="article-action-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -2411,6 +3275,141 @@ function libraryCountLabel(articleCount: number, pendingCount: number) {
   const pendingLabel =
     pendingCount === 1 ? "1 parsing" : `${pendingCount} parsing`;
   return `${articleLabel} / ${pendingLabel}`;
+}
+
+function filterAndSortArticles(
+  articles: ArticleSummary[],
+  location: LibraryLocation,
+  sort: LibrarySortMode,
+) {
+  const folderId = location.startsWith("folder:")
+    ? location.slice("folder:".length)
+    : null;
+  const filtered = articles.filter((article) => {
+    if (location === "archive") {
+      return Boolean(article.archivedAt);
+    }
+
+    if (article.archivedAt) {
+      return false;
+    }
+
+    if (location === "inbox") {
+      return !article.folderId;
+    }
+
+    if (folderId) {
+      return article.folderId === folderId;
+    }
+
+    return true;
+  });
+
+  return filtered.sort((left, right) => {
+    const titleOrder = left.title.localeCompare(right.title, undefined, {
+      sensitivity: "base",
+      numeric: true,
+    });
+    const savedOrder = dateValue(right.createdAt) - dateValue(left.createdAt);
+
+    switch (sort) {
+      case "saved-asc":
+        return -savedOrder || titleOrder;
+      case "read-desc":
+        return (
+          dateValue(right.progress.updatedAt) -
+            dateValue(left.progress.updatedAt) ||
+          savedOrder ||
+          titleOrder
+        );
+      case "title-asc":
+        return titleOrder || savedOrder;
+      case "duration-asc":
+        return (
+          left.estimatedMinutes - right.estimatedMinutes ||
+          titleOrder ||
+          savedOrder
+        );
+      case "duration-desc":
+        return (
+          right.estimatedMinutes - left.estimatedMinutes ||
+          titleOrder ||
+          savedOrder
+        );
+      case "saved-desc":
+        return savedOrder || titleOrder;
+      default:
+        sort satisfies never;
+        return 0;
+    }
+  });
+}
+
+function compareFolders(left: ArticleFolder, right: ArticleFolder) {
+  return left.name.localeCompare(right.name, undefined, {
+    sensitivity: "base",
+    numeric: true,
+  });
+}
+
+function emptyLibraryMessage(location: LibraryLocation) {
+  if (location === "archive") {
+    return "No archived articles.";
+  }
+
+  if (location === "inbox") {
+    return "Inbox is clear.";
+  }
+
+  if (location.startsWith("folder:")) {
+    return "No articles in this folder.";
+  }
+
+  return "Use Add to save your first article.";
+}
+
+function articleCardMeta(item: ArticleSummary, folderName?: string) {
+  const source = item.sourceUrl
+    ? sourceDomain(item.sourceUrl).replace(/^www\./u, "")
+    : sourceLabel(item.sourceType);
+  const parts = [
+    `${source} / ${formatCompactAge(item.createdAt)}`,
+    `${item.estimatedMinutes} min`,
+  ];
+  const progress = Math.round(progressRatio(item) * 100);
+
+  if (progress > 0) {
+    parts.push(`${progress}% read`);
+  }
+
+  if (folderName) {
+    parts.push(folderName);
+  }
+
+  return parts.join(" · ");
+}
+
+function formatCompactAge(value: string) {
+  const elapsed = Date.now() - dateValue(value);
+  const days = Math.max(0, Math.floor(elapsed / 86_400_000));
+
+  if (days === 0) {
+    return "today";
+  }
+
+  if (days < 30) {
+    return `${days}d`;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+  }).format(new Date(value));
+}
+
+function dateValue(value: string) {
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function progressRatio(

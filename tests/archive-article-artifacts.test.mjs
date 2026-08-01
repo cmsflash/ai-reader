@@ -42,6 +42,26 @@ registerHooks({
 const { archiveArticleArtifacts } = await import(
   "../src/server/artifacts/archiveArticleArtifacts.ts"
 );
+const { normalizedImageContentType } = await import(
+  "../src/server/artifacts/imageRequests.ts"
+);
+
+test("accepts extension-backed images served as generic binary data", () => {
+  assert.equal(
+    normalizedImageContentType(
+      "application/octet-stream",
+      new URL("https://cdn.example.com/preview.format-webp.webp"),
+    ),
+    "image/webp",
+  );
+  assert.equal(
+    normalizedImageContentType(
+      "application/octet-stream",
+      new URL("https://cdn.example.com/not-an-image.bin"),
+    ),
+    null,
+  );
+});
 
 test("stops best-effort image archiving at the article time budget", async () => {
   const originalFetch = globalThis.fetch;

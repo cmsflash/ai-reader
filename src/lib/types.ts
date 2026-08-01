@@ -41,11 +41,24 @@ export type ReadingProgress = {
   updatedAt: string;
 };
 
+export type ArticleFolder = {
+  id: string;
+  name: string;
+  slug?: string;
+  isArchive: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ArticleSummary = {
   id: string;
   title: string;
   sourceType: SourceType;
   sourceUrl?: string;
+  excerpt?: string;
+  thumbnailUrl?: string;
+  folderId?: string;
+  archivedAt?: string;
   createdAt: string;
   updatedAt: string;
   wordCount: number;
@@ -64,4 +77,5 @@ export type Article = ArticleSummary & {
 export type ArticleStore = {
   version: 1;
   articles: Article[];
+  folders?: ArticleFolder[];
 };

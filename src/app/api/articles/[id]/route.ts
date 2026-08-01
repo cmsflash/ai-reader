@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   deleteSavedArticle,
   getSavedArticle,
+  updateSavedArticleOrganization,
   updateSavedArticleProgress,
 } from "@/server/articles/articleService";
 import { requireAppUser } from "@/server/auth/access";
@@ -45,7 +46,32 @@ export async function PATCH(request: Request, context: RouteContext) {
         sentenceIndex?: number;
         percent?: number;
       };
+      organization?: {
+        archived?: unknown;
+        folderId?: unknown;
+      };
     };
+
+    if (!body.progress && !body.organization) {
+      throw new Error("An article update is required.");
+    }
+
+    if (body.organization) {
+      const organization = await updateSavedArticleOrganization(
+        id,
+        auth.user.ownerEmail,
+        organizationPatch(body.organization),
+      );
+
+      if (!organization) {
+        return NextResponse.json(
+          { error: "Article not found." },
+          { status: 404 },
+        );
+      }
+
+      return NextResponse.json({ organization });
+    }
 
     const result = await updateSavedArticleProgress(
       id,
@@ -66,6 +92,35 @@ export async function PATCH(request: Request, context: RouteContext) {
       { status: 400 },
     );
   }
+}
+
+function organizationPatch(value: {
+  archived?: unknown;
+  folderId?: unknown;
+}) {
+  const patch: { archived?: boolean; folderId?: string | null } = {};
+
+  if (Object.hasOwn(value, "archived")) {
+    if (typeof value.archived !== "boolean") {
+      throw new Error("Archived must be true or false.");
+    }
+
+    patch.archived = value.archived;
+  }
+
+  if (Object.hasOwn(value, "folderId")) {
+    if (value.folderId !== null && typeof value.folderId !== "string") {
+      throw new Error("Folder ID must be a string or null.");
+    }
+
+    patch.folderId = value.folderId?.trim() || null;
+  }
+
+  if (!Object.hasOwn(patch, "archived") && !Object.hasOwn(patch, "folderId")) {
+    throw new Error("Archive or folder state is required.");
+  }
+
+  return patch;
 }
 
 export async function DELETE(_request: Request, context: RouteContext) {
