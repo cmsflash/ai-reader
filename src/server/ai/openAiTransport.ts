@@ -13,6 +13,7 @@ const maxRealtimeAnswerCharacters = 256_000;
 export type DiscussionReply = {
   reply: string;
   responseId?: string;
+  model?: string;
   incomplete: boolean;
   usage?: {
     inputTokens: number;
@@ -203,6 +204,7 @@ function parseDiscussionReply(payload: unknown, status: number): DiscussionReply
   return {
     reply,
     ...(typeof object.id === "string" ? { responseId: object.id } : {}),
+    ...(typeof object.model === "string" ? { model: object.model } : {}),
     incomplete: object.status === "incomplete",
     ...(inputTokens !== undefined &&
     outputTokens !== undefined &&

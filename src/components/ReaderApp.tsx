@@ -34,6 +34,8 @@ import type {
 } from "react";
 import {
   ArticleDiscussion,
+  type ArticleDiscussionMode,
+  type ArticleDiscussionPhoneSnap,
   type ArticleDiscussionScope,
 } from "@/components/ArticleDiscussion";
 import { AuthSignOutButton } from "@/components/AuthSignOutButton";
@@ -308,6 +310,11 @@ export function ReaderApp() {
   const [discussionOpen, setDiscussionOpen] = useState(false);
   const [discussionScope, setDiscussionScope] =
     useState<ArticleDiscussionScope>(wholeArticleDiscussionScope);
+  const discussionMode = useArticleDiscussionMode();
+  const [discussionPhoneSnap, setDiscussionPhoneSnap] =
+    useState<ArticleDiscussionPhoneSnap>("half");
+  const [discussionComposerFocusRequest, setDiscussionComposerFocusRequest] =
+    useState(0);
   const [selectionDiscussionAction, setSelectionDiscussionAction] =
     useState<SelectionDiscussionAction | null>(null);
   const [appView, setAppView] = useState<AppView>("library");
@@ -458,6 +465,7 @@ export function ReaderApp() {
   useEffect(() => {
     setDiscussionOpen(false);
     setDiscussionScope(wholeArticleDiscussionScope);
+    setDiscussionPhoneSnap("half");
     setSelectionDiscussionAction(null);
   }, [selectedId]);
 
@@ -1352,22 +1360,62 @@ export function ReaderApp() {
     const bounds = selection.getRangeAt(0).getBoundingClientRect();
     const actionWidth = 212;
     const gutter = 12;
+    const viewport = window.visualViewport;
+    const viewportLeft = viewport?.offsetLeft ?? 0;
+    const viewportTop = viewport?.offsetTop ?? 0;
+    const viewportWidth = viewport?.width ?? window.innerWidth;
+    const viewportHeight = viewport?.height ?? window.innerHeight;
     const aboveSelection = bounds.top - 48;
     const top =
-      aboveSelection >= gutter
+      aboveSelection >= viewportTop + gutter
         ? aboveSelection
-        : Math.min(bounds.bottom + 10, window.innerHeight - 50);
+        : Math.min(
+            bounds.bottom + 10,
+            viewportTop + viewportHeight - 50,
+          );
 
     setSelectionDiscussionAction({
       text,
       tooLong: text.length > maxDiscussionSelectionCharacters,
       left: Math.min(
-        Math.max(bounds.left + bounds.width / 2 - actionWidth / 2, gutter),
-        window.innerWidth - actionWidth - gutter,
+        Math.max(
+          bounds.left + bounds.width / 2 - actionWidth / 2,
+          viewportLeft + gutter,
+        ),
+        viewportLeft + viewportWidth - actionWidth - gutter,
       ),
       top,
     });
   }, []);
+
+  useEffect(() => {
+    if (
+      appView !== "reader" ||
+      (discussionOpen && discussionMode === "overlay")
+    ) {
+      return;
+    }
+
+    let frame = 0;
+    const captureOnSelectionChange = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(captureArticleSelection);
+    };
+
+    document.addEventListener("selectionchange", captureOnSelectionChange);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener(
+        "selectionchange",
+        captureOnSelectionChange,
+      );
+    };
+  }, [
+    appView,
+    captureArticleSelection,
+    discussionMode,
+    discussionOpen,
+  ]);
 
   const openWholeArticleDiscussion = useCallback(() => {
     window.getSelection()?.removeAllRanges();
@@ -1385,10 +1433,14 @@ export function ReaderApp() {
       kind: "selection",
       text: selectionDiscussionAction.text,
     });
+    if (discussionOpen) {
+      setDiscussionPhoneSnap("expanded");
+      setDiscussionComposerFocusRequest((current) => current + 1);
+    }
     setDiscussionOpen(true);
     setSelectionDiscussionAction(null);
     window.getSelection()?.removeAllRanges();
-  }, [selectionDiscussionAction]);
+  }, [discussionOpen, selectionDiscussionAction]);
 
   const closeDiscussion = useCallback(() => {
     setDiscussionOpen(false);
@@ -1698,8 +1750,22 @@ export function ReaderApp() {
   const dropboxReady = integrationProviderReady(dropboxStatus);
   const instapaperFolders = integrationFolderOptions(instapaperStatus?.folders);
 
+  const readerAppClassName = [
+    "reader-app",
+    `view-${appView}`,
+    ...(discussionOpen
+      ? [
+          "discussion-open",
+          `discussion-mode-${discussionMode}`,
+          ...(discussionMode === "sheet"
+            ? [`discussion-snap-${discussionPhoneSnap}`]
+            : []),
+        ]
+      : []),
+  ].join(" ");
+
   return (
-    <main className={`reader-app view-${appView}`}>
+    <main className={readerAppClassName}>
       {appView === "library" ? (
         <section className="library-panel app-surface" aria-label="Library">
           <header className="app-bar library-app-bar">
@@ -2420,38 +2486,62 @@ export function ReaderApp() {
         />
       ) : null}
 
-      {appView === "reader" && selectionDiscussionAction && !discussionOpen ? (
-        <button
-          className="selection-discuss-button"
-          type="button"
-          style={{
-            left: selectionDiscussionAction.left,
-            top: selectionDiscussionAction.top,
-          }}
-          disabled={selectionDiscussionAction.tooLong}
-          title={
-            selectionDiscussionAction.tooLong
-              ? "Select a shorter passage (24,000 characters or fewer)."
-              : "Discuss only the selected passage"
-          }
-          onPointerDown={(event) => event.preventDefault()}
-          onClick={openSelectionDiscussion}
-        >
-          <MessageCircle size={16} />
-          {selectionDiscussionAction.tooLong
-            ? "Select a shorter passage"
-            : "Discuss selection"}
-        </button>
+      {appView === "reader" &&
+      selectionDiscussionAction &&
+      (!discussionOpen || discussionMode !== "overlay") ? (
+        <>
+          <button
+            className="selection-discuss-button"
+            type="button"
+            style={{
+              left: selectionDiscussionAction.left,
+              top: selectionDiscussionAction.top,
+            }}
+            disabled={selectionDiscussionAction.tooLong}
+            aria-describedby={
+              selectionDiscussionAction.tooLong
+                ? "selection-discussion-limit"
+                : undefined
+            }
+            title={
+              selectionDiscussionAction.tooLong
+                ? "Select a shorter passage (24,000 characters or fewer)."
+                : "Discuss only the selected passage"
+            }
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={openSelectionDiscussion}
+          >
+            <MessageCircle size={16} />
+            {selectionDiscussionAction.tooLong
+              ? "Select a shorter passage"
+              : "Discuss selection"}
+          </button>
+          {selectionDiscussionAction.tooLong ? (
+            <span
+              className="visually-hidden"
+              id="selection-discussion-limit"
+              role="status"
+            >
+              Select a passage of 24,000 characters or fewer to discuss it.
+            </span>
+          ) : null}
+        </>
       ) : null}
       {article ? (
         <ArticleDiscussion
           articleId={article.id}
           articleTitle={article.title}
           open={discussionOpen}
+          mode={discussionMode}
+          phoneSnap={discussionPhoneSnap}
           scope={discussionScope}
           onClose={closeDiscussion}
+          onPhoneSnapChange={setDiscussionPhoneSnap}
           onSwitchToWhole={switchDiscussionToWholeArticle}
+          onSelectionConsumed={switchDiscussionToWholeArticle}
           onBeforeVoiceStart={stopSpeaking}
+          returnFocusRef={readerBackButtonRef}
+          focusComposerRequest={discussionComposerFocusRequest}
         />
       ) : null}
     </main>
@@ -3104,6 +3194,29 @@ function SentenceChunks({
       {index < chunks.length - 1 ? " " : ""}
     </span>
   ));
+}
+
+function useArticleDiscussionMode(): ArticleDiscussionMode {
+  const [mode, setMode] = useState<ArticleDiscussionMode>("overlay");
+
+  useEffect(() => {
+    const desktop = window.matchMedia("(min-width: 1200px)");
+    const phone = window.matchMedia("(max-width: 700px)");
+    const updateMode = () => {
+      setMode(desktop.matches ? "dock" : phone.matches ? "sheet" : "overlay");
+    };
+
+    updateMode();
+    desktop.addEventListener("change", updateMode);
+    phone.addEventListener("change", updateMode);
+
+    return () => {
+      desktop.removeEventListener("change", updateMode);
+      phone.removeEventListener("change", updateMode);
+    };
+  }, []);
+
+  return mode;
 }
 
 function integrationProviderReady(status?: IntegrationProviderStatus) {

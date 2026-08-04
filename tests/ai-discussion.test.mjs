@@ -4,7 +4,6 @@ import {
   DISCUSSION_MODEL,
   DiscussionInputError,
   MAX_ARTICLE_CONTEXT_CHARACTERS,
-  MAX_DISCUSSION_HISTORY_ITEMS,
   REALTIME_DISCUSSION_MODEL,
   buildRealtimeSession,
   buildResponsesRequest,
@@ -38,9 +37,10 @@ const validAnswer = [
   "",
 ].join("\r\n");
 
-test("parses the typed discussion request and enforces history and selection bounds", () => {
+test("parses a client-keyed typed request and ignores browser-supplied history", () => {
   assert.deepEqual(
     parseDiscussionRequest({
+      requestId: "turn-123",
       articleId: "article-1",
       scope: "selection",
       selection: "Selected sentence.",
@@ -51,20 +51,18 @@ test("parses the typed discussion request and enforces history and selection bou
       ],
     }),
     {
+      requestId: "turn-123",
       articleId: "article-1",
       scope: "selection",
       selection: "Selected sentence.",
       message: "Explain this.",
-      history: [
-        { role: "user", content: "What does it mean?" },
-        { role: "assistant", content: "It describes a constraint." },
-      ],
     },
   );
 
   assert.throws(
     () =>
       parseDiscussionRequest({
+        requestId: "turn-123",
         articleId: "article-1",
         scope: "selection",
         message: "Explain this.",
@@ -77,17 +75,14 @@ test("parses the typed discussion request and enforces history and selection bou
   assert.throws(
     () =>
       parseDiscussionRequest({
+        requestId: "turn id with spaces",
         articleId: "article-1",
         scope: "whole",
         message: "Explain this.",
-        history: Array.from(
-          { length: MAX_DISCUSSION_HISTORY_ITEMS + 1 },
-          () => ({ role: "user", content: "Question" }),
-        ),
       }),
     (error) =>
       error instanceof DiscussionInputError &&
-      error.message.includes("history must contain at most"),
+      error.message.includes("requestId may contain only"),
   );
 });
 
@@ -101,6 +96,7 @@ test("selection context must come from the authorized article and excludes other
     "The selected sentence is here.",
   );
   const request = parseDiscussionRequest({
+    requestId: "turn-selection",
     articleId: article.id,
     scope: "selection",
     selection: "The selected sentence is here.",
@@ -155,6 +151,7 @@ test("whole-article context is complete within the bound and reports truncation 
 test("Responses transport keeps credentials in the authorization header and returns typed text", async () => {
   const request = buildResponsesRequest(
     parseDiscussionRequest({
+      requestId: "turn-transport",
       articleId: "article-1",
       scope: "whole",
       message: "Summarize this.",
@@ -214,6 +211,7 @@ test("Responses transport does not expose API keys through upstream errors", asy
       requestDiscussionReply(
         buildResponsesRequest(
           parseDiscussionRequest({
+            requestId: "turn-error",
             articleId: "article-1",
             scope: "whole",
             message: "Question",
@@ -257,6 +255,7 @@ test("Responses transport recognizes the purpose-scoped local shell key", async 
     const result = await requestDiscussionReply(
       buildResponsesRequest(
         parseDiscussionRequest({
+          requestId: "turn-shell-key",
           articleId: "article-1",
           scope: "whole",
           message: "Question",
@@ -300,6 +299,7 @@ test("Responses transport returns a model refusal as a safe discussion reply", a
   const result = await requestDiscussionReply(
     buildResponsesRequest(
       parseDiscussionRequest({
+        requestId: "turn-refusal",
         articleId: "article-1",
         scope: "whole",
         message: "Question",

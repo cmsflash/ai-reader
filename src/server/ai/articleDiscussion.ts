@@ -9,6 +9,7 @@ export const MAX_DISCUSSION_HISTORY_ITEMS = 12;
 export const MAX_DISCUSSION_HISTORY_ITEM_CHARACTERS = 4_000;
 export const MAX_DISCUSSION_HISTORY_CHARACTERS = 24_000;
 export const MAX_REALTIME_SDP_CHARACTERS = 200_000;
+export const MAX_DISCUSSION_REQUEST_ID_CHARACTERS = 128;
 
 const maxArticleIdCharacters = 256;
 const maxArticleTitleCharacters = 500;
@@ -21,11 +22,11 @@ export type DiscussionHistoryItem = {
 };
 
 export type DiscussionRequest = {
+  requestId: string;
   articleId: string;
   scope: DiscussionScope;
   selection?: string;
   message: string;
-  history: DiscussionHistoryItem[];
 };
 
 export type RealtimeDiscussionCallRequest = {
@@ -101,11 +102,12 @@ export class DiscussionInputError extends Error {
 
 export function parseDiscussionRequest(value: unknown): DiscussionRequest {
   const body = requiredRecord(value, "A JSON request body is required.");
-  const articleId = requiredBoundedString(
-    body.articleId,
-    "articleId",
-    maxArticleIdCharacters,
+  const requestId = requiredBoundedString(
+    body.requestId,
+    "requestId",
+    MAX_DISCUSSION_REQUEST_ID_CHARACTERS,
   );
+  const articleId = parseDiscussionArticleId(body.articleId);
   const scope = parseDiscussionScope(body.scope);
   const message = requiredBoundedString(
     body.message,
@@ -120,15 +122,28 @@ export function parseDiscussionRequest(value: unknown): DiscussionRequest {
           MAX_SELECTION_CHARACTERS,
         )
       : undefined;
-  const history = parseDiscussionHistory(body.history);
+
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(requestId)) {
+    throw new DiscussionInputError(
+      "requestId may contain only letters, numbers, dots, underscores, colons, and hyphens.",
+    );
+  }
 
   return {
+    requestId,
     articleId,
     scope,
     selection,
     message,
-    history,
   };
+}
+
+export function parseDiscussionArticleId(value: unknown) {
+  return requiredBoundedString(
+    value,
+    "articleId",
+    maxArticleIdCharacters,
+  );
 }
 
 export function parseRealtimeDiscussionCallForm(
@@ -233,6 +248,7 @@ export function createArticleDiscussionContext(
 export function buildResponsesRequest(
   request: DiscussionRequest,
   context: ArticleDiscussionContext,
+  history: DiscussionHistoryItem[] = [],
 ): OpenAIResponsesRequest {
   return {
     model: DISCUSSION_MODEL,
@@ -247,7 +263,7 @@ export function buildResponsesRequest(
         role: "user",
         content: sourceContextMessage(context),
       },
-      ...request.history,
+      ...history,
       {
         role: "user",
         content: request.message,
@@ -289,54 +305,6 @@ export function buildRealtimeSession(
       },
     },
   };
-}
-
-function parseDiscussionHistory(value: unknown): DiscussionHistoryItem[] {
-  if (value === undefined) {
-    return [];
-  }
-
-  if (!Array.isArray(value)) {
-    throw new DiscussionInputError("history must be an array.");
-  }
-
-  if (value.length > MAX_DISCUSSION_HISTORY_ITEMS) {
-    throw new DiscussionInputError(
-      `history must contain at most ${MAX_DISCUSSION_HISTORY_ITEMS} items.`,
-    );
-  }
-
-  let totalCharacters = 0;
-  const history = value.map<DiscussionHistoryItem>((item, index) => {
-    const record = requiredRecord(item, `history[${index}] must be an object.`);
-    const role = record.role;
-
-    if (role !== "user" && role !== "assistant") {
-      throw new DiscussionInputError(
-        `history[${index}].role must be user or assistant.`,
-      );
-    }
-
-    const content = requiredBoundedString(
-      record.content,
-      `history[${index}].content`,
-      MAX_DISCUSSION_HISTORY_ITEM_CHARACTERS,
-    );
-    totalCharacters += content.length;
-
-    return {
-      role,
-      content,
-    };
-  });
-
-  if (totalCharacters > MAX_DISCUSSION_HISTORY_CHARACTERS) {
-    throw new DiscussionInputError(
-      `history must contain at most ${MAX_DISCUSSION_HISTORY_CHARACTERS} characters.`,
-    );
-  }
-
-  return history;
 }
 
 function parseDiscussionScope(value: unknown): DiscussionScope {

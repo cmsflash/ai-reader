@@ -4312,3 +4312,434 @@ input[type="range"] {
     outline-offset: -2px;
   }
 }
+
+/* Responsive discussion shell: authoritative layout overrides. */
+:root {
+  --discussion-pane-width: clamp(360px, 30vw, 440px);
+}
+
+.discussion-drawer:is(
+    .discussion-mode-dock,
+    .discussion-mode-overlay,
+    .discussion-mode-sheet
+  ) {
+  display: flex;
+  position: fixed;
+  z-index: 61;
+  inset: auto;
+  max-width: none;
+  max-height: none;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  transform: none;
+}
+
+.discussion-drawer.discussion-mode-dock {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: auto;
+  width: var(--discussion-pane-width);
+  height: 100dvh;
+  border-width: 0 0 0 1px;
+  border-radius: 0;
+  box-shadow: -12px 0 34px color-mix(in srgb, var(--scrim) 18%, transparent);
+}
+
+@media (min-width: 1200px) {
+  .reader-app.view-reader .reader-panel {
+    margin-right: auto;
+    transition: width 180ms ease;
+  }
+
+  .reader-app.view-reader.discussion-open.discussion-mode-dock .reader-panel {
+    width: calc(100% - var(--discussion-pane-width));
+  }
+}
+
+.discussion-drawer.discussion-mode-overlay {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: auto;
+  width: clamp(420px, 42vw, 480px);
+  max-width: calc(100vw - 32px);
+  height: 100dvh;
+  border-width: 0 0 0 1px;
+  border-radius: 0;
+  box-shadow: -18px 0 48px color-mix(in srgb, var(--scrim) 40%, transparent);
+}
+
+.discussion-scrim {
+  z-index: 60;
+  background: var(--scrim);
+  backdrop-filter: blur(1px);
+}
+
+.discussion-content {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.discussion-drawer .discussion-header,
+.discussion-drawer .discussion-composer,
+.discussion-drawer .voice-panel {
+  background: var(--surface-raised);
+}
+
+.discussion-drawer .discussion-scope-card {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.discussion-scope-card > strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+
+.discussion-drawer .discussion-message p,
+.discussion-drawer .discussion-message.pending {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.discussion-drawer .discussion-message.user p {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background: var(--accent-soft);
+}
+
+.discussion-message blockquote {
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent-soft) 58%, var(--surface));
+  color: var(--muted);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+
+.discussion-message.error p {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.discussion-sheet-resizer,
+.discussion-call-bar {
+  display: none;
+}
+
+.discussion-drawer.discussion-mode-sheet {
+  top: auto;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  max-width: 100%;
+  border-width: 1px 0 0;
+  border-radius: 18px 18px 0 0;
+  box-shadow: 0 -16px 42px color-mix(in srgb, var(--scrim) 36%, transparent);
+  transition: height 180ms ease;
+}
+
+.discussion-mode-sheet.discussion-snap-compact {
+  height: auto;
+  min-height: 0;
+}
+
+.discussion-mode-sheet.discussion-snap-half {
+  height: min(58dvh, 600px);
+}
+
+.discussion-mode-sheet.discussion-snap-expanded {
+  height: calc(100dvh - max(10px, env(safe-area-inset-top)));
+}
+
+@media (max-width: 700px) {
+  .reader-app.view-reader.discussion-open.discussion-mode-sheet .reader-actions {
+    opacity: 0;
+    pointer-events: none;
+    visibility: hidden;
+  }
+
+  .reader-app.view-reader.discussion-open.discussion-mode-sheet.discussion-snap-half
+    .article-body {
+    padding-bottom: calc(min(58dvh, 600px) + 40px);
+  }
+
+  .reader-app.view-reader.discussion-open.discussion-mode-sheet.discussion-snap-compact
+    .article-body {
+    padding-bottom: max(128px, calc(env(safe-area-inset-bottom) + 112px));
+  }
+}
+
+.discussion-mode-sheet.discussion-snap-compact .discussion-content {
+  display: none;
+}
+
+.discussion-mode-sheet .discussion-sheet-resizer {
+  display: flex;
+  min-height: 45px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+  padding: 0 8px 0 12px;
+}
+
+.discussion-drag-handle,
+.discussion-snap-button,
+.discussion-sheet-close,
+.discussion-call-summary,
+.discussion-call-action {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.discussion-drag-handle {
+  display: grid;
+  min-width: 72px;
+  min-height: 44px;
+  flex: 1 1 auto;
+  place-items: center;
+  border-radius: 8px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.discussion-drag-handle:hover,
+.discussion-drag-handle:focus-visible,
+.discussion-snap-button:hover,
+.discussion-snap-button:focus-visible,
+.discussion-sheet-close:hover,
+.discussion-sheet-close:focus-visible {
+  background: var(--surface-subtle);
+  color: var(--ink);
+}
+
+.discussion-drag-handle > span {
+  display: block;
+  width: 46px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+
+.discussion-snap-controls {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.discussion-snap-button {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border-radius: 8px;
+}
+
+.discussion-sheet-close {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+}
+
+.discussion-snap-button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.discussion-snap-button > span {
+  position: relative;
+  display: block;
+  width: 20px;
+  height: 17px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+}
+
+.discussion-snap-button > span::after {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  left: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  content: "";
+}
+
+.discussion-snap-button.snap-compact > span::after {
+  height: 3px;
+}
+
+.discussion-snap-button.snap-half > span::after {
+  height: 7px;
+}
+
+.discussion-snap-button.snap-expanded > span::after {
+  height: 11px;
+}
+
+.discussion-mode-sheet .discussion-header {
+  padding-top: 13px;
+}
+
+.discussion-mode-sheet .discussion-header > .icon-button {
+  display: none;
+}
+
+.discussion-mode-sheet .discussion-composer {
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+}
+
+.discussion-mode-sheet .discussion-call-bar {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface-raised);
+  padding: 8px 10px max(8px, env(safe-area-inset-bottom));
+}
+
+.discussion-call-summary {
+  display: grid;
+  min-width: 0;
+  min-height: 56px;
+  flex: 1 1 auto;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border-radius: 10px;
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.discussion-call-summary > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.discussion-call-summary strong,
+.discussion-call-summary small {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discussion-call-summary strong {
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.discussion-call-summary small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.discussion-call-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.discussion-call-action {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--ink);
+}
+
+.discussion-call-action:hover,
+.discussion-call-action:focus-visible {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+
+.discussion-call-action.end {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.discussion-call-action.expand {
+  width: 44px;
+  height: 44px;
+}
+
+.discussion-history-note {
+  align-self: center;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 0.7rem;
+  padding: 5px 9px;
+  text-align: center;
+}
+
+@media (max-width: 380px) {
+  .discussion-mode-sheet .discussion-sheet-resizer {
+    padding-left: 8px;
+  }
+
+  .discussion-drag-handle {
+    min-width: 48px;
+  }
+
+  .discussion-call-summary {
+    padding-inline: 4px;
+  }
+
+  .discussion-call-actions {
+    gap: 5px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reader-app.view-reader .reader-panel,
+  .discussion-drawer.discussion-mode-sheet {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .discussion-drawer:is(
+      .discussion-mode-dock,
+      .discussion-mode-overlay,
+      .discussion-mode-sheet
+    ),
+  .discussion-call-action,
+  .discussion-snap-button > span {
+    border: 1px solid CanvasText;
+  }
+}

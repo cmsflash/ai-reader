@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { DiscussionInputError } from "@/server/ai/articleDiscussion";
 import { OpenAIServiceError } from "@/server/ai/openAiTransport";
+import { DiscussionPersistenceError } from "@/server/ports/discussionRepository";
 
 export function requireSameOriginResponse(request: Request) {
   const origin = request.headers.get("origin");
@@ -57,6 +58,13 @@ export function aiRouteErrorResponse(error: unknown) {
     return NextResponse.json(
       { error: "AI discussion is temporarily unavailable." },
       { status: 502 },
+    );
+  }
+
+  if (error instanceof DiscussionPersistenceError) {
+    return NextResponse.json(
+      { error: "Discussion history is temporarily unavailable." },
+      { status: 503 },
     );
   }
 

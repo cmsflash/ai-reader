@@ -1,9 +1,26 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   backfillArticleContentFingerprints,
   fingerprintArticleContentForMigration,
+  splitStatements,
 } from "../scripts/migrate-postgres.mjs";
+
+test("discussion migration is safe for the replay-only migration runner", async () => {
+  const migration = await readFile(
+    new URL("../migrations/011_article_discussions.sql", import.meta.url),
+    "utf8",
+  );
+  const statements = splitStatements(migration);
+
+  assert.equal(statements.length, 3);
+  assert.ok(statements.every((statement) => statement.includes("IF NOT EXISTS")));
+  assert.equal(/\b(?:DROP|TRUNCATE|CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION)\b/i.test(migration), false);
+  assert.match(statements[0], /articles \(owner_email, id\)/);
+  assert.match(statements[1], /FOREIGN KEY \(owner_email, article_id\)/);
+  assert.match(statements[2], /owner_email, article_id, sequence/);
+});
 
 test("fingerprint backfill leaves historical duplicates unindexed and is idempotent", async () => {
   const duplicateBody =
