@@ -44,6 +44,13 @@ import {
   type AnnotatedBlock,
   type SentenceSegment,
 } from "@/lib/sentences";
+import {
+  integrationSyncMaxRequests,
+  integrationSyncRequestBatchSize,
+  mergeIntegrationSyncResponses,
+  shouldContinueIntegrationSync,
+  type IntegrationSyncResponse,
+} from "@/lib/integrationSync";
 import type {
   Article,
   ArticleFolder,
@@ -122,22 +129,6 @@ type IntegrationStatusResponse = {
   dropbox?: IntegrationProviderStatus;
 };
 
-type IntegrationSyncResponse = {
-  imported: number;
-  deduplicated: number;
-  reconciled: number;
-  failed: number;
-  skipped: number;
-  remaining: number;
-  possiblyTruncated?: boolean;
-  failures?: Array<{
-    externalId: string;
-    title: string;
-    error: string;
-  }>;
-  message?: string;
-};
-
 type IntegrationProvider = "instapaper" | "dropbox";
 
 type LibrarySortMode =
@@ -170,7 +161,6 @@ type OrganizationNotice = {
   };
 };
 
-const integrationBatchSize = 5;
 const wholeArticleDiscussionScope: ArticleDiscussionScope = { kind: "whole" };
 const maxDiscussionSelectionCharacters = 24_000;
 
@@ -1622,32 +1612,59 @@ export function ReaderApp() {
         ? "Syncing Instapaper…"
         : "Syncing @Voice from Dropbox…",
     );
+    let result: IntegrationSyncResponse | null = null;
 
     try {
       const endpoint =
         provider === "instapaper"
           ? "/api/integrations/instapaper/sync"
           : "/api/integrations/dropbox/sync";
-      const body =
-        provider === "instapaper"
-          ? { folder: instapaperFolder, batchSize: integrationBatchSize }
-          : { batchSize: integrationBatchSize };
-      const result = await requestJson<IntegrationSyncResponse>(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(body),
-      });
+      for (
+        let completedRequests = 1;
+        completedRequests <= integrationSyncMaxRequests;
+        completedRequests += 1
+      ) {
+        const body =
+          provider === "instapaper"
+            ? {
+                folder: instapaperFolder,
+                batchSize: integrationSyncRequestBatchSize,
+              }
+            : { batchSize: integrationSyncRequestBatchSize };
+        const response = await requestJson<IntegrationSyncResponse>(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
 
-      setIntegrationNotice(integrationSyncMessage(provider, result));
+        result = mergeIntegrationSyncResponses(result, response);
+
+        if (!shouldContinueIntegrationSync(response, completedRequests)) {
+          break;
+        }
+      }
+
+      setIntegrationNotice(
+        integrationSyncMessage(provider, result ?? emptyIntegrationSyncResponse()),
+      );
       await Promise.all([loadArticles(false), loadIntegrationStatus()]);
     } catch (syncError) {
+      const failureMessage = `${provider === "instapaper" ? "Instapaper" : "@Voice"} sync stopped: ${messageFromError(
+        syncError,
+      )}`;
       setIntegrationNotice(
-        `${provider === "instapaper" ? "Instapaper" : "@Voice"} sync failed: ${messageFromError(
-          syncError,
-        )}`,
+        result
+          ? `${integrationSyncMessage(provider, result)} ${failureMessage}`
+          : failureMessage,
       );
+
+      if (result) {
+        await Promise.all([loadArticles(false), loadIntegrationStatus()]).catch(
+          () => undefined,
+        );
+      }
     } finally {
       setSyncingIntegration(null);
     }
@@ -3300,6 +3317,17 @@ function integrationSyncMessage(
     result.remaining > 0 ? ` · ${result.remaining} remaining` : "";
 
   return `${name}: ${result.imported} imported · ${result.deduplicated} deduplicated · ${result.reconciled} reconciled · ${result.skipped} skipped · ${result.failed} failed${remaining}${detailSuffix}`;
+}
+
+function emptyIntegrationSyncResponse(): IntegrationSyncResponse {
+  return {
+    imported: 0,
+    deduplicated: 0,
+    reconciled: 0,
+    failed: 0,
+    skipped: 0,
+    remaining: 0,
+  };
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {

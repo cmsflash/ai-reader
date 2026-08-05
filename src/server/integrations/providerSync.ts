@@ -38,8 +38,8 @@ import { withProviderSyncLock } from "@/server/integrations/providerSyncLock";
 
 const INSTAPAPER_PROVIDER = "instapaper";
 const DROPBOX_PROVIDER = "dropbox-atvoice";
-const DEFAULT_BATCH_SIZE = 3;
-const MAX_BATCH_SIZE = 10;
+const DEFAULT_BATCH_SIZE = 1;
+const MAX_BATCH_SIZE = 1;
 const INSTAPAPER_SYNC_REQUEST_TIMEOUT_MS = 8_000;
 const INSTAPAPER_SYNC_MAX_ATTEMPTS = 2;
 
@@ -646,7 +646,7 @@ async function deleteArticleBestEffort(articleId: string, ownerEmail: string) {
   }
 }
 
-function normalizeBatchSize(value?: number) {
+export function normalizeBatchSize(value?: number) {
   if (!Number.isFinite(value)) {
     return DEFAULT_BATCH_SIZE;
   }

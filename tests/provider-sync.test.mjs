@@ -42,6 +42,7 @@ registerHooks({
 const {
   cleanupReplacedArticle,
   compareImportCandidates,
+  normalizeBatchSize,
   recoveredImportOutcome,
   remainingCandidateCount,
   retryPendingCleanup,
@@ -73,6 +74,13 @@ test("only resolved candidates reduce the remaining count", () => {
     4,
   );
   assert.equal(remainingCandidateCount(1, 1, 1, 1), 0);
+});
+
+test("serverless provider sync claims at most one item per request", () => {
+  assert.equal(normalizeBatchSize(undefined), 1);
+  assert.equal(normalizeBatchSize(1), 1);
+  assert.equal(normalizeBatchSize(5), 1);
+  assert.equal(normalizeBatchSize(Number.POSITIVE_INFINITY), 1);
 });
 
 test("falls back to the live URL when Instapaper text is not an article", () => {
