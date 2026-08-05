@@ -123,6 +123,7 @@ export async function articleFromUrl(rawUrl: string): Promise<Article> {
   });
 
   if (!response.ok) {
+    await cancelFetchResponse(response);
     throw new Error(`Could not fetch URL: ${response.status} ${response.statusText}`);
   }
 
@@ -747,6 +748,7 @@ async function extractStaticBundleArticle(
       });
 
       if (!response.ok) {
+        await cancelFetchResponse(response);
         continue;
       }
 
@@ -762,6 +764,14 @@ async function extractStaticBundleArticle(
   }
 
   return null;
+}
+
+async function cancelFetchResponse(response: Response) {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // A response that is already closed or locked needs no further cleanup.
+  }
 }
 
 function scriptAssetUrls(rawHtml: string, sourceUrl: string) {
