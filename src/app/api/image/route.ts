@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
-import { imageFetchHeaders } from "@/server/artifacts/imageRequests";
+import {
+  imageFetchHeaders,
+  normalizedImageContentType,
+} from "@/server/artifacts/imageRequests";
 import { requireAppUserResponse } from "@/server/auth/access";
+import { fetchPublicResource } from "@/server/security/publicArticleUrl";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -17,9 +21,8 @@ export async function GET(request: Request) {
     const imageUrl = parseHttpUrl(requestUrl.searchParams.get("url"), "Image URL is required.");
     const sourceUrl = parseOptionalHttpUrl(requestUrl.searchParams.get("source"));
 
-    const response = await fetch(imageUrl.href, {
+    const { response } = await fetchPublicResource(imageUrl.href, {
       headers: imageFetchHeaders(imageUrl, sourceUrl),
-      redirect: "follow",
     });
 
     if (!response.ok) {
@@ -29,9 +32,12 @@ export async function GET(request: Request) {
       );
     }
 
-    const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+    const contentType = normalizedImageContentType(
+      response.headers.get("content-type") ?? "application/octet-stream",
+      imageUrl,
+    );
 
-    if (!contentType.toLowerCase().startsWith("image/")) {
+    if (!contentType) {
       return NextResponse.json({ error: "The requested URL did not return an image." }, { status: 415 });
     }
 

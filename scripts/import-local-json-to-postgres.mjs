@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { neon } from "@neondatabase/serverless";
 import { loadLocalEnv } from "./lib/env.mjs";
@@ -26,6 +27,86 @@ if (!ownerEmail) {
 }
 
 const sql = neon(databaseUrl);
+const folderIdMap = new Map();
+
+for (const folder of store.folders ?? []) {
+  const name = String(folder.name ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
+
+  if (!folder.id || !name) {
+    continue;
+  }
+
+  const existing = await sql.query(
+    `
+      SELECT id
+      FROM reading_folders
+      WHERE owner_email = $1 AND (id = $2 OR lower(name) = lower($3))
+      ORDER BY CASE WHEN id = $2 THEN 0 ELSE 1 END
+      LIMIT 1
+    `,
+    [ownerEmail, folder.id, name],
+  );
+
+  if (existing[0]) {
+    folderIdMap.set(folder.id, existing[0].id);
+    continue;
+  }
+
+  const [savedFolder] = await sql.query(
+    `
+      INSERT INTO reading_folders (
+        id,
+        owner_email,
+        name,
+        slug,
+        is_archive,
+        sort_order,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz)
+      ON CONFLICT (owner_email, slug) DO UPDATE SET
+        name = EXCLUDED.name,
+        is_archive = EXCLUDED.is_archive,
+        sort_order = EXCLUDED.sort_order,
+        updated_at = EXCLUDED.updated_at
+      RETURNING id
+    `,
+    [
+      folder.id,
+      ownerEmail,
+      name,
+      importedFolderSlug(name, folder.id),
+      Boolean(folder.isArchive),
+      Number.isFinite(folder.sortOrder) ? folder.sortOrder : 0,
+      folder.createdAt ?? new Date().toISOString(),
+      folder.updatedAt ?? folder.createdAt ?? new Date().toISOString(),
+    ],
+  );
+
+  if (!savedFolder) {
+    throw new Error(`Could not import folder ${name}.`);
+  }
+
+  folderIdMap.set(folder.id, savedFolder.id);
+}
+
+for (const folderId of new Set(
+  store.articles.map((article) => article.folderId).filter(Boolean),
+)) {
+  if (folderIdMap.has(folderId)) {
+    continue;
+  }
+
+  const [existing] = await sql.query(
+    "SELECT id FROM reading_folders WHERE owner_email = $1 AND id = $2 LIMIT 1",
+    [ownerEmail, folderId],
+  );
+
+  if (existing) {
+    folderIdMap.set(folderId, existing.id);
+  }
+}
 
 for (const article of store.articles) {
   await sql.query(
@@ -36,6 +117,8 @@ for (const article of store.articles) {
         title,
         source_type,
         source_url,
+        folder_id,
+        archived_at,
         created_at,
         updated_at,
         word_count,
@@ -47,14 +130,19 @@ for (const article of store.articles) {
         progress_updated_at,
         content_html,
         text_content,
-        blocks
+        blocks,
+        excerpt,
+        thumbnail_url,
+        preview_version
       )
-      VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8, $9, $10, $11, $12, $13, $14::timestamptz, $15, $16, $17::jsonb)
+      VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::timestamptz, $10, $11, $12, $13, $14, $15, $16::timestamptz, $17, $18, $19::jsonb, $20, $21, 2)
       ON CONFLICT (id) DO UPDATE SET
         owner_email = EXCLUDED.owner_email,
         title = EXCLUDED.title,
         source_type = EXCLUDED.source_type,
         source_url = EXCLUDED.source_url,
+        folder_id = EXCLUDED.folder_id,
+        archived_at = EXCLUDED.archived_at,
         created_at = EXCLUDED.created_at,
         updated_at = EXCLUDED.updated_at,
         word_count = EXCLUDED.word_count,
@@ -66,7 +154,10 @@ for (const article of store.articles) {
         progress_updated_at = EXCLUDED.progress_updated_at,
         content_html = EXCLUDED.content_html,
         text_content = EXCLUDED.text_content,
-        blocks = EXCLUDED.blocks
+        blocks = EXCLUDED.blocks,
+        excerpt = EXCLUDED.excerpt,
+        thumbnail_url = EXCLUDED.thumbnail_url,
+        preview_version = EXCLUDED.preview_version
     `,
     [
       article.id,
@@ -74,6 +165,8 @@ for (const article of store.articles) {
       article.title,
       article.sourceType,
       article.sourceUrl ?? null,
+      folderIdMap.get(article.folderId) ?? null,
+      article.archivedAt ?? null,
       article.createdAt,
       article.updatedAt,
       article.wordCount,
@@ -86,6 +179,8 @@ for (const article of store.articles) {
       article.contentHtml,
       article.textContent,
       JSON.stringify(article.blocks ?? []),
+      article.excerpt ?? articleExcerpt(article),
+      article.thumbnailUrl ?? articleThumbnailUrl(article),
     ],
   );
 }
@@ -98,4 +193,78 @@ function ownerEmailForImport() {
     process.env.AI_READER_ALLOWED_EMAILS?.split(",")[0]?.trim().toLowerCase() ||
     ""
   );
+}
+
+function folderSlug(name) {
+  return (
+    name
+      .normalize("NFKD")
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, "-")
+      .replace(/^-+|-+$/gu, "") || "folder"
+  );
+}
+
+function importedFolderSlug(name, id) {
+  const fingerprint = createHash("sha256")
+    .update(`${id}:${name.normalize("NFKC").toLocaleLowerCase()}`)
+    .digest("hex")
+    .slice(0, 12);
+
+  return `${folderSlug(name)}-${fingerprint}`;
+}
+
+function articleExcerpt(article) {
+  const candidates = (article.blocks ?? [])
+    .filter((block) => ["paragraph", "quote"].includes(block.type))
+    .map((block) => String(block.text ?? "").replace(/\s+/gu, " ").trim())
+    .filter((text) => text && !isLikelyPreviewBoilerplate(text));
+  const excerpt =
+    candidates.find((text) => text.length >= 80) ??
+    candidates.find((text) => text.length >= 40) ??
+    candidates[0] ??
+    String(article.textContent ?? "");
+  const compact = excerpt.replace(/\s+/gu, " ").trim();
+  return compact.length > 360 ? `${compact.slice(0, 359).trimEnd()}…` : compact;
+}
+
+function articleThumbnailUrl(article) {
+  const candidates = (article.blocks ?? [])
+    .filter((block) => block.type === "image" && (block.src || block.originalSrc))
+    .map((block) => ({
+      url: block.src || block.originalSrc,
+      descriptor: `${block.alt ?? ""} ${block.src ?? ""} ${block.originalSrc ?? ""}`,
+    }));
+  const lowValue = /(?:^|[\s/_-])(avatar|emoji|favicon|icon|logo|profile)(?:[\s/_.-]|$)/i;
+  return candidates.find((candidate) => !lowValue.test(candidate.descriptor))?.url ??
+    candidates[0]?.url ??
+    null;
+}
+
+function isLikelyPreviewBoilerplate(text) {
+  const normalized = text.toLocaleLowerCase();
+
+  if (
+    /^(?:updated|published|posted|last updated)\s+(?:on\s+)?/u.test(normalized) ||
+    /^(?:share this(?: post)?|in this (?:blog|article))$/u.test(normalized)
+  ) {
+    return true;
+  }
+
+  const rolePattern =
+    /\b(?:student researcher|researcher|fellow|vice president|vp|chief [a-z -]+ officer|editor|writer)\b/iu;
+  const looksLikeByline =
+    !/[.!?][”"']?$/u.test(text) &&
+    text.split(",").length >= 2 &&
+    rolePattern.test(text);
+  const looksLikeAuthorBio =
+    /^[^.!?]{1,80}\s+(?:is|was)\s+(?:the|a|an)\s+(?:chief|vice president|vp|president|director|professor|researcher|writer|editor|founder|co-founder)\b/iu.test(
+      text,
+    );
+  const looksLikeCredentials =
+    /^[^.!?]{1,80}\s+(?:received|earned|holds?)\s+(?:his|her|their|a)\s+(?:ph\.?d|doctorate|master)/iu.test(
+      text,
+    );
+
+  return looksLikeByline || looksLikeAuthorBio || looksLikeCredentials;
 }

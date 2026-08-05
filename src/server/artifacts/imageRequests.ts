@@ -16,6 +16,39 @@ export function imageFetchHeaders(imageUrl: URL, sourceUrl: URL | null) {
   return headers;
 }
 
+export function normalizedImageContentType(contentType: string, imageUrl: URL) {
+  const normalized = contentType.split(";", 1)[0]?.trim().toLowerCase();
+
+  if (normalized?.startsWith("image/")) {
+    return normalized;
+  }
+
+  if (
+    normalized !== "application/octet-stream" &&
+    normalized !== "binary/octet-stream"
+  ) {
+    return null;
+  }
+
+  const extension = imageUrl.pathname.split(".").at(-1)?.toLowerCase();
+
+  switch (extension) {
+    case "avif":
+      return "image/avif";
+    case "gif":
+      return "image/gif";
+    case "jpeg":
+    case "jpg":
+      return "image/jpeg";
+    case "png":
+      return "image/png";
+    case "webp":
+      return "image/webp";
+    default:
+      return null;
+  }
+}
+
 function refererForImage(imageUrl: URL, sourceUrl: URL | null) {
   if (!sourceUrl) {
     return undefined;
