@@ -64,10 +64,9 @@ test("accepts extension-backed images served as generic binary data", () => {
 });
 
 test("stops best-effort image archiving at the article time budget", async () => {
-  const originalFetch = globalThis.fetch;
   let aborted = false;
 
-  globalThis.fetch = async (_input, init) =>
+  const fetchImageResource = async (_input, init) =>
     new Promise((_resolve, reject) => {
       const signal = init?.signal;
 
@@ -88,17 +87,13 @@ test("stops best-effort image archiving at the article time budget", async () =>
     });
 
   const article = articleFixture();
+  const archived = await archiveArticleArtifacts(article, {
+    fetchImageResource,
+    timeoutMs: 5,
+  });
 
-  try {
-    const archived = await archiveArticleArtifacts(article, {
-      timeoutMs: 5,
-    });
-
-    assert.equal(aborted, true);
-    assert.deepEqual(archived, article);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  assert.equal(aborted, true);
+  assert.deepEqual(archived, article);
 });
 
 function articleFixture() {
