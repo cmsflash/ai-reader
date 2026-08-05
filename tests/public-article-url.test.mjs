@@ -109,6 +109,28 @@ test("validates archived image URLs and redirects before fetching private networ
   assert.deepEqual(requestedUrls, ["https://93.184.216.34/image.png"]);
 });
 
+test("cancels a redirect body when the destination is missing", async () => {
+  let cancelCalls = 0;
+  const request = async () => ({
+    status: 302,
+    headers: new Headers(),
+    body: {
+      async cancel() {
+        cancelCalls += 1;
+      },
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      fetchPublicResource("https://93.184.216.34/article", {}, 5, {
+        request,
+      }),
+    /redirect without a destination/i,
+  );
+  assert.equal(cancelCalls, 1);
+});
+
 test("blocks DNS rebinding at the connection lookup before reaching a private server", async (t) => {
   let serverHits = 0;
   const server = createServer((_request, response) => {

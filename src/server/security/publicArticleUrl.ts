@@ -114,6 +114,7 @@ export async function fetchPublicResource(
     const location = response.headers.get("location");
 
     if (!location) {
+      await cancelResponseBody(response);
       throw new Error("The remote server returned a redirect without a destination.");
     }
 
