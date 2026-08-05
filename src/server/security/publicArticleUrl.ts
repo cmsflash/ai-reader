@@ -1,9 +1,47 @@
-import { isIP } from "node:net";
+import { isIP, type LookupFunction } from "node:net";
 import { lookup } from "node:dns/promises";
+import ipaddr from "ipaddr.js";
+import {
+  Agent,
+  type Dispatcher,
+} from "undici";
 
 const redirectStatuses = new Set([301, 302, 303, 307, 308]);
 
-export async function validatePublicArticleUrl(rawUrl: string) {
+type PublicAddress = {
+  address: string;
+  family: 4 | 6;
+};
+
+type ResolveAddresses = (hostname: string) => Promise<PublicAddress[]>;
+
+type PublicFetch = (
+  input: string | URL,
+  init?: RequestInit & { dispatcher?: Dispatcher },
+) => Promise<Response>;
+
+type PublicResourceDependencies = {
+  dispatcher?: Dispatcher;
+  request?: PublicFetch;
+  resolveAddresses?: ResolveAddresses;
+};
+
+const defaultPublicFetch: PublicFetch = (input, init) =>
+  fetch(input, init as RequestInit);
+const publicResourceDispatcher = createPublicResourceDispatcher();
+
+export async function validatePublicArticleUrl(
+  rawUrl: string,
+  resolveAddresses: ResolveAddresses = resolveHostnameAddresses,
+) {
+  const { url } = await resolvePublicArticleTarget(rawUrl, resolveAddresses);
+  return url;
+}
+
+async function resolvePublicArticleTarget(
+  rawUrl: string,
+  resolveAddresses: ResolveAddresses,
+) {
   let url: URL;
 
   try {
@@ -34,34 +72,38 @@ export async function validatePublicArticleUrl(rawUrl: string) {
     throw new Error("Private-network article URLs are not allowed.");
   }
 
-  if (isPrivateAddress(hostname)) {
+  const literalFamily = isIP(hostname);
+
+  if (literalFamily && isPrivateAddress(hostname)) {
     throw new Error("Private-network article URLs are not allowed.");
   }
 
-  if (!isIP(hostname)) {
-    const addresses = await lookup(hostname, { all: true, verbatim: true });
+  const addresses = literalFamily
+    ? [{ address: hostname, family: literalFamily } as PublicAddress]
+    : validatedPublicAddresses(await resolveAddresses(hostname));
 
-    if (
-      addresses.length === 0 ||
-      addresses.some((address) => isPrivateAddress(address.address))
-    ) {
-      throw new Error("The article hostname resolves to a private network.");
-    }
-  }
-
-  return url;
+  return { addresses, url };
 }
 
 export async function fetchPublicResource(
   rawUrl: string,
   init: Omit<RequestInit, "redirect"> = {},
   maxRedirects = 5,
+  dependencies: PublicResourceDependencies = {},
 ) {
-  let url = await validatePublicArticleUrl(rawUrl);
+  const request = dependencies.request ?? defaultPublicFetch;
+  const dispatcher = dependencies.dispatcher ?? publicResourceDispatcher;
+  const resolveAddresses = dependencies.resolveAddresses ?? resolveHostnameAddresses;
+  let { url } = await resolvePublicArticleTarget(rawUrl, resolveAddresses);
 
   for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
-    const response = await fetch(url, {
+    const headers = new Headers(init.headers);
+    headers.delete("host");
+
+    const response = await request(url, {
       ...init,
+      dispatcher,
+      headers,
       redirect: "manual",
     });
 
@@ -76,10 +118,15 @@ export async function fetchPublicResource(
     }
 
     if (redirectCount === maxRedirects) {
+      await cancelResponseBody(response);
       throw new Error("The article URL redirected too many times.");
     }
 
-    url = await validatePublicArticleUrl(new URL(location, url).href);
+    await cancelResponseBody(response);
+    ({ url } = await resolvePublicArticleTarget(
+      new URL(location, url).href,
+      resolveAddresses,
+    ));
   }
 
   throw new Error("The article URL redirected too many times.");
@@ -89,8 +136,14 @@ export async function fetchPublicImageResource(
   rawUrl: string,
   init: Omit<RequestInit, "redirect">,
   maxBytes: number,
+  dependencies: PublicResourceDependencies = {},
 ) {
-  const { response, url } = await fetchPublicResource(rawUrl, init);
+  const { response, url } = await fetchPublicResource(
+    rawUrl,
+    init,
+    5,
+    dependencies,
+  );
 
   if (!response.ok) {
     await cancelResponseBody(response);
@@ -183,72 +236,109 @@ function responseBodyTooLargeError(maxBytes: number) {
   return new Error(`Remote resource exceeds the ${maxBytes}-byte archive limit.`);
 }
 
-function isPrivateAddress(address: string) {
-  const normalized = address.toLowerCase();
-  const version = isIP(normalized);
-
-  if (version === 4) {
-    const octets = normalized.split(".").map(Number);
-    const [first, second] = octets;
-
-    return (
-      first === 0 ||
-      first === 10 ||
-      first === 127 ||
-      (first === 100 && second >= 64 && second <= 127) ||
-      (first === 169 && second === 254) ||
-      (first === 172 && second >= 16 && second <= 31) ||
-      (first === 192 && second === 0) ||
-      (first === 192 && second === 168) ||
-      (first === 198 && (second === 18 || second === 19)) ||
-      first >= 224
-    );
-  }
-
-  if (version === 6) {
-    const mappedIpv4 = mappedIpv4Address(normalized);
-
-    if (mappedIpv4) {
-      return isPrivateAddress(mappedIpv4);
-    }
-
-    return (
-      normalized === "::" ||
-      normalized === "::1" ||
-      normalized.startsWith("fc") ||
-      normalized.startsWith("fd") ||
-      normalized.startsWith("fe8") ||
-      normalized.startsWith("fe9") ||
-      normalized.startsWith("fea") ||
-      normalized.startsWith("feb")
-    );
-  }
-
-  return false;
+export function createPublicResourceDispatcher(
+  resolveAddresses: ResolveAddresses = resolveHostnameAddresses,
+) {
+  return new Agent({
+    connect: {
+      lookup: createPublicAddressLookup(resolveAddresses),
+    },
+  });
 }
 
-function mappedIpv4Address(address: string) {
-  const dotted = address.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+export function createPublicAddressLookup(
+  resolveAddresses: ResolveAddresses = resolveHostnameAddresses,
+): LookupFunction {
+  return (hostname, options, callback) => {
+    void resolveAddresses(normalizeHostname(hostname))
+      .then(validatedPublicAddresses)
+      .then((addresses) => {
+        const requestedFamily = normalizedLookupFamily(options.family);
+        const matchingAddresses = requestedFamily
+          ? addresses.filter((address) => address.family === requestedFamily)
+          : addresses;
 
-  if (dotted) {
-    return dotted;
+        if (matchingAddresses.length === 0) {
+          throw lookupFailure(
+            `The article hostname has no public IPv${requestedFamily} address.`,
+            "EAI_ADDRFAMILY",
+          );
+        }
+
+        if (options.all) {
+          callback(null, matchingAddresses);
+          return;
+        }
+
+        const [address] = matchingAddresses;
+        callback(null, address.address, address.family);
+      })
+      .catch((error: unknown) => {
+        callback(asLookupError(error), "", 0);
+      });
+  };
+}
+
+async function resolveHostnameAddresses(hostname: string): Promise<PublicAddress[]> {
+  const addresses = await lookup(hostname, { all: true, verbatim: true });
+
+  return addresses.map((address) => ({
+    address: address.address,
+    family: address.family === 6 ? 6 : 4,
+  }));
+}
+
+function validatedPublicAddresses(addresses: PublicAddress[]) {
+  if (
+    addresses.length === 0 ||
+    addresses.some(
+      ({ address, family }) =>
+        isIP(address) !== family || isPrivateAddress(address),
+    )
+  ) {
+    throw lookupFailure("The article hostname resolves to a private network.");
   }
 
-  const hexadecimal = address.match(
-    /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/,
-  );
+  return addresses;
+}
 
-  if (!hexadecimal) {
-    return undefined;
+function normalizedLookupFamily(family: number | string | undefined) {
+  if (family === 4 || family === "IPv4") {
+    return 4;
   }
 
-  const high = Number.parseInt(hexadecimal[1], 16);
-  const low = Number.parseInt(hexadecimal[2], 16);
+  if (family === 6 || family === "IPv6") {
+    return 6;
+  }
 
-  return [
-    high >> 8,
-    high & 0xff,
-    low >> 8,
-    low & 0xff,
-  ].join(".");
+  return undefined;
+}
+
+function normalizeHostname(hostname: string) {
+  return hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "");
+}
+
+function lookupFailure(message: string, code = "ENOTFOUND") {
+  const error = new Error(message) as NodeJS.ErrnoException;
+  error.code = code;
+  return error;
+}
+
+function asLookupError(error: unknown) {
+  if (error instanceof Error) {
+    return error as NodeJS.ErrnoException;
+  }
+
+  return lookupFailure("The article hostname could not be resolved.");
+}
+
+function isPrivateAddress(address: string) {
+  try {
+    return ipaddr.process(address).range() !== "unicast";
+  } catch {
+    return true;
+  }
 }

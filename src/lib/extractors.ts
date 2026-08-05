@@ -739,7 +739,7 @@ async function extractStaticBundleArticle(
 
   for (const assetUrl of assetUrls) {
     try {
-      const response = await fetch(assetUrl.href, {
+      const { response } = await fetchPublicResource(assetUrl.href, {
         headers: {
           accept: "application/javascript,text/javascript,*/*;q=0.8",
           "user-agent": articleRequestHeaders["user-agent"],
