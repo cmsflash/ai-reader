@@ -3,6 +3,7 @@ import { lookup } from "node:dns/promises";
 import ipaddr from "ipaddr.js";
 import {
   Agent,
+  fetch as undiciFetch,
   type Dispatcher,
 } from "undici";
 
@@ -26,8 +27,7 @@ type PublicResourceDependencies = {
   resolveAddresses?: ResolveAddresses;
 };
 
-const defaultPublicFetch: PublicFetch = (input, init) =>
-  fetch(input, init as RequestInit);
+const defaultPublicFetch = undiciFetch as unknown as PublicFetch;
 const publicResourceDispatcher = createPublicResourceDispatcher();
 
 export async function validatePublicArticleUrl(

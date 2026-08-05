@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import test from "node:test";
-import { fetch as undiciFetch } from "undici";
 import {
   createPublicAddressLookup,
   createPublicResourceDispatcher,
@@ -147,7 +146,6 @@ test("blocks DNS rebinding at the connection lookup before reaching a private se
         0,
         {
           dispatcher,
-          request: undiciFetch,
           resolveAddresses,
         },
       ),

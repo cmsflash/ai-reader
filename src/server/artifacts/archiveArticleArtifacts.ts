@@ -9,6 +9,7 @@ const maxArtifactBytes = 30 * 1024 * 1024;
 const artifactArchiveTimeoutMs = 18_000;
 
 type ArchiveArticleArtifactsOptions = {
+  fetchImageResource?: typeof fetchPublicImageResource;
   timeoutMs?: number;
 };
 
@@ -43,6 +44,7 @@ export async function archiveArticleArtifacts(
         block,
         index,
         controller.signal,
+        options.fetchImageResource ?? fetchPublicImageResource,
       );
       changed ||= archived !== block;
       archivedBlocks.push(archived);
@@ -76,6 +78,7 @@ async function archiveImageBlock(
   block: Extract<ArticleBlock, { type: "image" }>,
   index: number,
   signal: AbortSignal,
+  fetchImageResource: typeof fetchPublicImageResource,
 ) {
   const source = remoteImageUrl(block.originalSrc ?? block.src);
 
@@ -85,7 +88,7 @@ async function archiveImageBlock(
 
   try {
     const sourceUrl = article.sourceUrl ? new URL(article.sourceUrl) : null;
-    const resource = await fetchPublicImageResource(
+    const resource = await fetchImageResource(
       source.href,
       {
         headers: imageFetchHeaders(source, sourceUrl),
