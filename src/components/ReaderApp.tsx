@@ -139,7 +139,7 @@ type LibrarySortMode =
   | "duration-asc"
   | "duration-desc";
 
-type LibraryLocation = "all" | "inbox" | "archive" | `folder:${string}`;
+type LibraryLocation = "all" | "archive" | `folder:${string}`;
 
 type ArticleActionState = {
   articleId: string;
@@ -150,7 +150,7 @@ type ArticleActionState = {
 
 type OrganizationPatch = {
   archived?: boolean;
-  folderId?: string | null;
+  folderId?: string;
 };
 
 type OrganizationNotice = {
@@ -371,6 +371,10 @@ export function ReaderApp() {
     () => new Map(folders.map((folder) => [folder.id, folder])),
     [folders],
   );
+  const defaultFolder = useMemo(
+    () => folders.find(isDefaultFolder),
+    [folders],
+  );
   const activeArticleCount = useMemo(
     () => articles.filter((item) => !item.archivedAt).length,
     [articles],
@@ -380,7 +384,10 @@ export function ReaderApp() {
     [articles, libraryLocation, librarySort],
   );
   const showPendingImports =
-    libraryLocation === "all" || libraryLocation === "inbox";
+    libraryLocation === "all" ||
+    Boolean(
+      defaultFolder && libraryLocation === `folder:${defaultFolder.id}`,
+    );
   const libraryItems = useMemo(
     () => [
       ...(showPendingImports
@@ -1101,21 +1108,20 @@ export function ReaderApp() {
       ? folderById.get(actionArticle.folderId)
       : undefined;
     const defaultFolder =
-      folders.find(
-        (folder) => !folder.isArchive && folder.slug === "default",
-      ) ?? folders.find((folder) => !folder.isArchive);
+      folders.find(isDefaultFolder) ??
+      folders.find((folder) => !folder.isArchive);
     const organization: OrganizationPatch = wasArchived
       ? {
           archived: false,
-          ...(currentFolder?.isArchive
-            ? { folderId: defaultFolder?.id ?? null }
+          ...(currentFolder?.isArchive && defaultFolder
+            ? { folderId: defaultFolder.id }
             : {}),
         }
       : { archived: true };
     const undoPatch: OrganizationPatch = {
       archived: wasArchived,
-      ...(wasArchived && currentFolder?.isArchive
-        ? { folderId: actionArticle.folderId ?? null }
+      ...(wasArchived && currentFolder?.isArchive && actionArticle.folderId
+        ? { folderId: actionArticle.folderId }
         : {}),
     };
     setArticleActionBusy(true);
@@ -1149,13 +1155,19 @@ export function ReaderApp() {
   ]);
 
   const moveArticleToFolder = useCallback(
-    async (folderId: string | null, destinationName?: string) => {
+    async (folderId: string, destinationName?: string) => {
       if (!actionArticle) {
         return false;
       }
 
-      const previousFolderId = actionArticle.folderId ?? null;
+      const previousFolderId =
+        actionArticle.folderId ?? defaultFolder?.id;
       const movingRestores = Boolean(actionArticle.archivedAt);
+
+      if (!previousFolderId) {
+        setArticleActionError("Default folder is unavailable.");
+        return false;
+      }
 
       if (previousFolderId === folderId && !movingRestores) {
         closeArticleActions();
@@ -1170,9 +1182,8 @@ export function ReaderApp() {
           folderId,
           ...(movingRestores ? { archived: false } : {}),
         });
-        const destination = folderId
-          ? (destinationName ?? folderById.get(folderId)?.name ?? "folder")
-          : "Inbox";
+        const destination =
+          destinationName ?? folderById.get(folderId)?.name ?? "folder";
         setOrganizationNotice({
           message: `Moved “${actionArticle.title}” to ${destination}.`,
           undo: {
@@ -1184,7 +1195,6 @@ export function ReaderApp() {
           },
         });
         const movedOutOfCurrentView =
-          (libraryLocation === "inbox" && folderId !== null) ||
           (libraryLocation === "archive" && movingRestores) ||
           (libraryLocation.startsWith("folder:") &&
             libraryLocation !== `folder:${folderId}`);
@@ -1204,6 +1214,7 @@ export function ReaderApp() {
     [
       actionArticle,
       closeArticleActions,
+      defaultFolder,
       focusAfterLibraryRemoval,
       folderById,
       libraryLocation,
@@ -1865,7 +1876,6 @@ export function ReaderApp() {
                   }
                 >
                   <option value="all">All articles</option>
-                  <option value="inbox">Inbox</option>
                   {folders
                     .filter((folder) => !folder.isArchive)
                     .map((folder) => (
@@ -2763,7 +2773,7 @@ function ArticleActionsDialog({
   onShowActions: () => void;
   onShowMove: () => void;
   onArchive: () => void;
-  onMove: (folderId: string | null) => void;
+  onMove: (folderId: string) => void;
   onCreateFolder: (name: string) => Promise<boolean>;
   onDelete: () => void;
 }) {
@@ -2857,7 +2867,7 @@ function ArticleActionsDialog({
               <div>
                 <span>Article actions</span>
                 <h2 id="article-action-title">{article.title}</h2>
-                <p>{currentFolderName ?? "Inbox"}</p>
+                <p>{currentFolderName ?? "Default"}</p>
               </div>
               <button
                 className="article-action-close"
@@ -2890,7 +2900,7 @@ function ArticleActionsDialog({
                 <FolderInput size={19} />
                 <span>
                   <strong>Move to folder</strong>
-                  <small>{currentFolderName ?? "Inbox"}</small>
+                  <small>{currentFolderName ?? "Default"}</small>
                 </span>
                 <ChevronRight className="article-action-chevron" size={17} />
               </button>
@@ -2936,15 +2946,6 @@ function ArticleActionsDialog({
               </button>
             </header>
             <div className="folder-choice-list">
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => onMove(null)}
-              >
-                <Folder size={18} />
-                <span>Inbox</span>
-                {!article.folderId ? <Check size={18} /> : null}
-              </button>
               {folders.map((folder) => (
                 <button
                   key={folder.id}
@@ -3435,10 +3436,6 @@ function filterAndSortArticles(
       return false;
     }
 
-    if (location === "inbox") {
-      return !article.folderId;
-    }
-
     if (folderId) {
       return article.folderId === folderId;
     }
@@ -3493,13 +3490,17 @@ function compareFolders(left: ArticleFolder, right: ArticleFolder) {
   });
 }
 
+function isDefaultFolder(folder: ArticleFolder) {
+  return (
+    !folder.isArchive &&
+    (folder.slug === "default" ||
+      folder.name.trim().toLocaleLowerCase() === "default")
+  );
+}
+
 function emptyLibraryMessage(location: LibraryLocation) {
   if (location === "archive") {
     return "No archived articles.";
-  }
-
-  if (location === "inbox") {
-    return "Inbox is clear.";
   }
 
   if (location.startsWith("folder:")) {

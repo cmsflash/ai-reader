@@ -98,7 +98,7 @@ function organizationPatch(value: {
   archived?: unknown;
   folderId?: unknown;
 }) {
-  const patch: { archived?: boolean; folderId?: string | null } = {};
+  const patch: { archived?: boolean; folderId?: string } = {};
 
   if (Object.hasOwn(value, "archived")) {
     if (typeof value.archived !== "boolean") {
@@ -109,11 +109,11 @@ function organizationPatch(value: {
   }
 
   if (Object.hasOwn(value, "folderId")) {
-    if (value.folderId !== null && typeof value.folderId !== "string") {
-      throw new Error("Folder ID must be a string or null.");
+    if (typeof value.folderId !== "string" || !value.folderId.trim()) {
+      throw new Error("Folder ID must be a non-empty string.");
     }
 
-    patch.folderId = value.folderId?.trim() || null;
+    patch.folderId = value.folderId.trim();
   }
 
   if (!Object.hasOwn(patch, "archived") && !Object.hasOwn(patch, "folderId")) {

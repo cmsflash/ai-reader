@@ -28,11 +28,17 @@ if (!ownerEmail) {
 
 const sql = neon(databaseUrl);
 const folderIdMap = new Map();
+const defaultFolderId = await ensureDefaultFolder(sql, ownerEmail);
 
 for (const folder of store.folders ?? []) {
   const name = String(folder.name ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
 
   if (!folder.id || !name) {
+    continue;
+  }
+
+  if (name.toLocaleLowerCase() === "default") {
+    folderIdMap.set(folder.id, defaultFolderId);
     continue;
   }
 
@@ -165,7 +171,7 @@ for (const article of store.articles) {
       article.title,
       article.sourceType,
       article.sourceUrl ?? null,
-      folderIdMap.get(article.folderId) ?? null,
+      folderIdMap.get(article.folderId) ?? defaultFolderId,
       article.archivedAt ?? null,
       article.createdAt,
       article.updatedAt,
@@ -186,6 +192,57 @@ for (const article of store.articles) {
 }
 
 console.log(`Imported ${store.articles.length} articles from ${storePath}.`);
+
+async function ensureDefaultFolder(sqlClient, normalizedOwnerEmail) {
+  const existing = await sqlClient.query(
+    `
+      SELECT id
+      FROM reading_folders
+      WHERE
+        owner_email = $1
+        AND (slug = 'default' OR lower(name) = 'default')
+      ORDER BY CASE WHEN slug = 'default' THEN 0 ELSE 1 END, sort_order, created_at
+      LIMIT 1
+    `,
+    [normalizedOwnerEmail],
+  );
+
+  if (existing[0]) {
+    return existing[0].id;
+  }
+
+  const id = `folder-default-${createHash("md5")
+    .update(normalizedOwnerEmail)
+    .digest("hex")}`;
+  const now = new Date().toISOString();
+  const [saved] = await sqlClient.query(
+    `
+      INSERT INTO reading_folders (
+        id,
+        owner_email,
+        name,
+        slug,
+        is_archive,
+        sort_order,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, 'Default', 'default', false, -1, $3::timestamptz, $3::timestamptz)
+      ON CONFLICT (owner_email, slug) DO UPDATE SET
+        name = 'Default',
+        is_archive = false,
+        sort_order = LEAST(reading_folders.sort_order, -1)
+      RETURNING id
+    `,
+    [id, normalizedOwnerEmail, now],
+  );
+
+  if (!saved) {
+    throw new Error("Could not create the Default folder.");
+  }
+
+  return saved.id;
+}
 
 function ownerEmailForImport() {
   return (

@@ -46,6 +46,7 @@ export class LocalJsonArticleRepository implements ArticleRepository {
   }
 
   async listFolders(ownerEmail: string) {
+    await this.ensureDefaultFolder(ownerEmail);
     const store = await this.readCurrentStore();
     return ((store.folders ?? []) as StoredFolder[])
       .filter((folder) => folderBelongsToOwner(folder, ownerEmail))
@@ -71,6 +72,10 @@ export class LocalJsonArticleRepository implements ArticleRepository {
 
     if (!normalizedName) {
       throw new Error("Folder name is required.");
+    }
+
+    if (normalizedName === "default") {
+      return this.ensureDefaultFolder(ownerEmail);
     }
 
     return this.mutateStore((store) => {
@@ -123,6 +128,7 @@ export class LocalJsonArticleRepository implements ArticleRepository {
   }
 
   async listArticles(ownerEmail: string) {
+    await this.ensureDefaultFolder(ownerEmail);
     const store = await this.readCurrentStore();
     return store.articles
       .filter((article) => articleBelongsToOwner(article, ownerEmail));
@@ -138,29 +144,31 @@ export class LocalJsonArticleRepository implements ArticleRepository {
   }
 
   async findById(id: string, ownerEmail: string) {
-    const store = await this.readCurrentStore();
+    const articles = await this.listArticles(ownerEmail);
     return (
-      store.articles.find(
-        (article) => article.id === id && articleBelongsToOwner(article, ownerEmail),
-      ) ?? null
+      articles.find((article) => article.id === id) ?? null
     );
   }
 
   async create(article: Article, ownerEmail: string) {
     return this.mutateStore((store) => {
-      const existing = store.articles.find(
+      const prepared = prepareStoreForOwner(store, ownerEmail);
+      const existing = prepared.store.articles.find(
         (candidate) =>
           candidate.id === article.id &&
           articleBelongsToOwner(candidate, ownerEmail),
       );
 
       if (existing) {
-        return { value: existing };
+        return {
+          store: prepared.changed ? prepared.store : undefined,
+          value: existing,
+        };
       }
 
       const contentFingerprint = articleContentFingerprint(article);
       const duplicate = contentFingerprint
-        ? store.articles.find(
+        ? prepared.store.articles.find(
             (candidate) =>
               articleBelongsToOwner(candidate, ownerEmail) &&
               articleContentFingerprint(candidate) === contentFingerprint,
@@ -168,20 +176,24 @@ export class LocalJsonArticleRepository implements ArticleRepository {
         : undefined;
 
       if (duplicate) {
-        return { value: duplicate };
+        return {
+          store: prepared.changed ? prepared.store : undefined,
+          value: duplicate,
+        };
       }
 
       const storedArticle: StoredArticle = {
         ...article,
+        folderId: article.folderId ?? prepared.defaultFolder.id,
         ownerEmail: normalizeOwnerEmail(ownerEmail),
       };
 
       return {
         store: {
-          ...store,
-          articles: [storedArticle, ...store.articles],
+          ...prepared.store,
+          articles: [storedArticle, ...prepared.store.articles],
         },
-        value: article,
+        value: storedArticle,
       };
     });
   }
@@ -314,22 +326,30 @@ export class LocalJsonArticleRepository implements ArticleRepository {
     organization: ArticleOrganizationPatch,
   ) {
     return this.mutateStore((store) => {
-      const articleIndex = store.articles.findIndex(
+      const prepared = prepareStoreForOwner(store, ownerEmail);
+      const articleIndex = prepared.store.articles.findIndex(
         (article) =>
           article.id === id && articleBelongsToOwner(article, ownerEmail),
       );
 
       if (articleIndex === -1) {
-        return { value: null };
+        return {
+          store: prepared.changed ? prepared.store : undefined,
+          value: null,
+        };
       }
 
       const hasFolderId = Object.hasOwn(organization, "folderId");
       const folderId = organization.folderId ?? null;
 
+      if (hasFolderId && !folderId) {
+        throw new Error("Folder is required.");
+      }
+
       if (
         hasFolderId &&
         folderId &&
-        !((store.folders ?? []) as StoredFolder[]).some(
+        !((prepared.store.folders ?? []) as StoredFolder[]).some(
           (folder) =>
             folder.id === folderId &&
             folderBelongsToOwner(folder, ownerEmail),
@@ -338,9 +358,9 @@ export class LocalJsonArticleRepository implements ArticleRepository {
         throw new Error("Folder not found.");
       }
 
-      const article = store.articles[articleIndex];
+      const article = prepared.store.articles[articleIndex];
       const now = new Date().toISOString();
-      const ownerFolders = ((store.folders ?? []) as StoredFolder[]).filter(
+      const ownerFolders = ((prepared.store.folders ?? []) as StoredFolder[]).filter(
         (folder) => folderBelongsToOwner(folder, ownerEmail),
       );
       const currentFolder = ownerFolders.find(
@@ -357,7 +377,7 @@ export class LocalJsonArticleRepository implements ArticleRepository {
       const updatedArticle: Article = {
         ...article,
         updatedAt: now,
-        folderId: hasFolderId ? folderId || undefined : restoredFolderId,
+        folderId: hasFolderId ? folderId ?? undefined : restoredFolderId,
         archivedAt:
           typeof organization.archived === "boolean"
             ? organization.archived
@@ -365,12 +385,12 @@ export class LocalJsonArticleRepository implements ArticleRepository {
               : undefined
             : article.archivedAt,
       };
-      const nextArticles = [...store.articles];
+      const nextArticles = [...prepared.store.articles];
       nextArticles[articleIndex] = updatedArticle;
 
       return {
         store: {
-          ...store,
+          ...prepared.store,
           articles: nextArticles,
         },
         value: organizationResult(updatedArticle),
@@ -446,6 +466,16 @@ export class LocalJsonArticleRepository implements ArticleRepository {
     return operation;
   }
 
+  private ensureDefaultFolder(ownerEmail: string) {
+    return this.mutateStore((store) => {
+      const prepared = prepareStoreForOwner(store, ownerEmail);
+      return {
+        store: prepared.changed ? prepared.store : undefined,
+        value: publicFolder(prepared.defaultFolder),
+      };
+    });
+  }
+
   private async writeStore(store: ArticleStore) {
     await fs.mkdir(path.dirname(this.storePath), { recursive: true });
     const tempPath = `${this.storePath}.${process.pid}.tmp`;
@@ -460,6 +490,70 @@ function articleBelongsToOwner(article: Article, ownerEmail: string) {
 
 function folderBelongsToOwner(folder: StoredFolder, ownerEmail: string) {
   return folder.ownerEmail === normalizeOwnerEmail(ownerEmail);
+}
+
+function prepareStoreForOwner(store: ArticleStore, ownerEmail: string) {
+  const normalizedOwner = normalizeOwnerEmail(ownerEmail);
+  const folders = (store.folders ?? []) as StoredFolder[];
+  let defaultFolder = folders.find(
+    (folder) =>
+      folderBelongsToOwner(folder, normalizedOwner) &&
+      !folder.isArchive &&
+      (folder.slug === "default" ||
+        normalizeFolderName(folder.name) === "default"),
+  );
+  let changed = false;
+  let nextFolders = folders;
+
+  if (!defaultFolder) {
+    const now = new Date().toISOString();
+    defaultFolder = {
+      id: `folder-${randomUUID()}`,
+      name: "Default",
+      slug: "default",
+      isArchive: false,
+      createdAt: now,
+      updatedAt: now,
+      ownerEmail: normalizedOwner,
+    };
+    nextFolders = [defaultFolder, ...folders];
+    changed = true;
+  }
+
+  const nextArticles = store.articles.map((article) => {
+    if (!articleBelongsToOwner(article, normalizedOwner) || article.folderId) {
+      return article;
+    }
+
+    changed = true;
+    return {
+      ...article,
+      folderId: defaultFolder.id,
+    };
+  });
+
+  return {
+    changed,
+    defaultFolder,
+    store: changed
+      ? {
+          ...store,
+          articles: nextArticles,
+          folders: nextFolders,
+        }
+      : store,
+  };
+}
+
+function publicFolder(folder: StoredFolder): ArticleFolder {
+  return {
+    id: folder.id,
+    name: folder.name,
+    slug: folder.slug,
+    isArchive: Boolean(folder.isArchive),
+    createdAt: folder.createdAt,
+    updatedAt: folder.updatedAt,
+  };
 }
 
 function normalizeOwnerEmail(ownerEmail: string) {

@@ -18,9 +18,16 @@ test("serializes concurrent creates without losing either article", async () => 
     ]);
 
     const articles = await repository.list("reader@example.com");
+    const folders = await repository.listFolders("reader@example.com");
     assert.deepEqual(
       new Set(articles.map((candidate) => candidate.id)),
       new Set(["first", "second"]),
+    );
+    assert.equal(folders.length, 1);
+    assert.equal(folders[0].name, "Default");
+    assert.equal(folders[0].slug, "default");
+    assert.ok(
+      articles.every((candidate) => candidate.folderId === folders[0].id),
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -191,10 +198,14 @@ test("persists owner-scoped folders and archive state without affecting article 
       "Research",
       "other@example.com",
     );
+    const defaultFolder = (await repository.listFolders("reader@example.com"))
+      .find((candidate) => candidate.slug === "default");
 
     assert.equal(reused.id, folder.id);
     assert.notEqual(otherOwnerFolder.id, folder.id);
+    assert.ok(defaultFolder);
     assert.deepEqual(await repository.listFolders("reader@example.com"), [
+      defaultFolder,
       folder,
     ]);
 

@@ -101,6 +101,7 @@ export class PostgresArticleRepository implements ArticleRepository {
   }
 
   async listFolders(ownerEmail: string) {
+    await this.ensureDefaultFolder(ownerEmail);
     const rows = await this.queryRows<PostgresArticleFolderRow>(
       `
         SELECT id, name, slug, is_archive, created_at, updated_at
@@ -120,6 +121,10 @@ export class PostgresArticleRepository implements ArticleRepository {
 
     if (!normalizedName) {
       throw new Error("Folder name is required.");
+    }
+
+    if (normalizedName === "default") {
+      return this.ensureDefaultFolder(ownerEmail);
     }
 
     const normalizedOwner = normalizeOwnerEmail(ownerEmail);
@@ -224,7 +229,12 @@ export class PostgresArticleRepository implements ArticleRepository {
 
   async create(article: Article, ownerEmail: string) {
     const normalizedOwner = normalizeOwnerEmail(ownerEmail);
-    const contentFingerprint = articleContentFingerprint(article);
+    const defaultFolder = await this.ensureDefaultFolder(normalizedOwner);
+    const articleToSave = {
+      ...article,
+      folderId: article.folderId ?? defaultFolder.id,
+    };
+    const contentFingerprint = articleContentFingerprint(articleToSave);
     const saved = await this.queryArticles(
       `
         INSERT INTO articles (
@@ -257,11 +267,11 @@ export class PostgresArticleRepository implements ArticleRepository {
         RETURNING ${articleColumns}
       `,
       [
-        article.id,
+        articleToSave.id,
         normalizedOwner,
-        ...articleParams(article).slice(1),
-        article.excerpt ?? articleExcerpt(article),
-        article.thumbnailUrl ?? articleThumbnailUrl(article),
+        ...articleParams(articleToSave).slice(1),
+        articleToSave.excerpt ?? articleExcerpt(articleToSave),
+        articleToSave.thumbnailUrl ?? articleThumbnailUrl(articleToSave),
         contentFingerprint ?? null,
       ],
     );
@@ -270,7 +280,7 @@ export class PostgresArticleRepository implements ArticleRepository {
       return rowToArticle(saved[0]);
     }
 
-    const existing = await this.findById(article.id, ownerEmail);
+    const existing = await this.findById(articleToSave.id, ownerEmail);
 
     if (existing) {
       return existing;
@@ -393,6 +403,10 @@ export class PostgresArticleRepository implements ArticleRepository {
     const hasFolderId = Object.hasOwn(organization, "folderId");
     const folderId = organization.folderId ?? null;
 
+    if (hasFolderId && !folderId) {
+      throw new Error("Folder is required.");
+    }
+
     const rows = await this.queryRows<PostgresArticleOrganizationRow>(
       `
         UPDATE articles
@@ -430,7 +444,6 @@ export class PostgresArticleRepository implements ArticleRepository {
           AND owner_email = $2
           AND (
             NOT $5::boolean
-            OR $6::text IS NULL
             OR EXISTS (
               SELECT 1
               FROM reading_folders
@@ -508,6 +521,58 @@ export class PostgresArticleRepository implements ArticleRepository {
   private async queryRows<T>(query: string, params: unknown[] = []) {
     const client = this.queryClient ?? getSql();
     return (await client.query(query, params)) as T[];
+  }
+
+  private async ensureDefaultFolder(ownerEmail: string) {
+    const normalizedOwner = normalizeOwnerEmail(ownerEmail);
+    const existing = await this.queryRows<PostgresArticleFolderRow>(
+      `
+        SELECT id, name, slug, is_archive, created_at, updated_at
+        FROM reading_folders
+        WHERE
+          owner_email = $1
+          AND (slug = 'default' OR lower(name) = 'default')
+        ORDER BY
+          CASE WHEN slug = 'default' THEN 0 ELSE 1 END,
+          sort_order,
+          created_at
+        LIMIT 1
+      `,
+      [normalizedOwner],
+    );
+
+    if (existing[0]) {
+      return rowToArticleFolder(existing[0]);
+    }
+
+    const now = new Date().toISOString();
+    const rows = await this.queryRows<PostgresArticleFolderRow>(
+      `
+        INSERT INTO reading_folders (
+          id,
+          owner_email,
+          name,
+          slug,
+          is_archive,
+          sort_order,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, 'Default', 'default', false, -1, $3::timestamptz, $3::timestamptz)
+        ON CONFLICT (owner_email, slug) DO UPDATE SET
+          name = 'Default',
+          is_archive = false,
+          sort_order = LEAST(reading_folders.sort_order, -1)
+        RETURNING id, name, slug, is_archive, created_at, updated_at
+      `,
+      [`folder-${randomUUID()}`, normalizedOwner, now],
+    );
+
+    if (!rows[0]) {
+      throw new Error("Could not create the Default folder.");
+    }
+
+    return rowToArticleFolder(rows[0]);
   }
 }
 

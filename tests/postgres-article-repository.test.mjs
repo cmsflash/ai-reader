@@ -146,6 +146,54 @@ test("deduplication listing transfers only fields used by the matcher", async ()
   ]);
 });
 
+test("folder listing creates a real Default folder when one is missing", async () => {
+  const queries = [];
+  const defaultRow = {
+    id: "folder-default",
+    name: "Default",
+    slug: "default",
+    is_archive: false,
+    created_at: "2026-08-10T12:00:00.000Z",
+    updated_at: "2026-08-10T12:00:00.000Z",
+  };
+  const repository = new PostgresArticleRepository({
+    async query(statement, params) {
+      const normalized = normalizeQuery(statement);
+      queries.push({ statement: normalized, params });
+
+      if (normalized.includes("AND (slug = 'default' OR lower(name) = 'default')")) {
+        return [];
+      }
+
+      if (normalized.startsWith("INSERT INTO reading_folders")) {
+        return [defaultRow];
+      }
+
+      if (normalized.startsWith("SELECT id, name, slug, is_archive")) {
+        return [defaultRow];
+      }
+
+      throw new Error(`Unexpected query: ${normalized}`);
+    },
+  });
+
+  assert.deepEqual(await repository.listFolders(" Reader@Example.com "), [
+    {
+      id: "folder-default",
+      name: "Default",
+      slug: "default",
+      isArchive: false,
+      createdAt: "2026-08-10T12:00:00.000Z",
+      updatedAt: "2026-08-10T12:00:00.000Z",
+    },
+  ]);
+  assert.equal(queries.length, 3);
+  assert.deepEqual(queries[0].params, ["reader@example.com"]);
+  assert.equal(queries[1].params[1], "reader@example.com");
+  assert.equal(queries[1].params.length, 3);
+  assert.deepEqual(queries[2].params, ["reader@example.com"]);
+});
+
 test("creates owner-scoped folders and atomically archives and moves an article", async () => {
   const queries = [];
   const repository = new PostgresArticleRepository({
@@ -229,7 +277,7 @@ test("creates owner-scoped folders and atomically archives and moves an article"
   assert.doesNotMatch(queries[2].statement, /content_html|text_content|blocks/);
 });
 
-test("null folder updates explicitly type the optional folder parameter", async () => {
+test("archive-only updates preserve the folder and null folder moves are rejected", async () => {
   const queries = [];
   const repository = new PostgresArticleRepository({
     async query(statement, params) {
@@ -256,25 +304,24 @@ test("null folder updates explicitly type the optional folder parameter", async 
     " Reader@Example.com ",
     { archived: true },
   );
-  const movedToInbox = await repository.updateOrganization(
-    "article-1",
-    " Reader@Example.com ",
-    { folderId: null },
+  await assert.rejects(
+    repository.updateOrganization(
+      "article-1",
+      " Reader@Example.com ",
+      { folderId: null },
+    ),
+    /Folder is required/,
   );
 
-  assert.equal(queries.length, 2);
+  assert.equal(queries.length, 1);
   assert.equal(queries[0].params[3], true);
   assert.equal(queries[0].params[4], false);
   assert.equal(queries[0].params[5], null);
-  assert.equal(queries[1].params[3], null);
-  assert.equal(queries[1].params[4], true);
-  assert.equal(queries[1].params[5], null);
   assert.match(queries[0].statement, /WHEN \$5::boolean THEN \$6::text/);
-  assert.match(queries[0].statement, /OR \$6::text IS NULL/);
+  assert.doesNotMatch(queries[0].statement, /OR \$6::text IS NULL/);
   assert.match(queries[0].statement, /id = \$6::text/);
   assert.equal(archived?.folderId, "folder-default");
   assert.ok(archived?.archivedAt);
-  assert.equal(movedToInbox?.folderId, "folder-default");
 });
 
 function normalizeQuery(statement) {

@@ -14,7 +14,7 @@ export type ArticleProgressPatch = Partial<Pick<ReadingProgress, "percent" | "se
 
 export type ArticleOrganizationPatch = {
   archived?: boolean;
-  folderId?: string | null;
+  folderId?: string;
 };
 
 export type ArticleOrganizationResult = {
