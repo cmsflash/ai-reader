@@ -45,9 +45,27 @@ const { PostgresArticleRepository } = await import(
 
 test("library listing selects and returns summary fields only", async () => {
   const queries = [];
+  const defaultFolder = {
+    id: "folder-default",
+    name: "Default",
+    slug: "default",
+    is_archive: false,
+    created_at: "2026-07-29T07:00:00.000Z",
+    updated_at: "2026-07-29T07:00:00.000Z",
+  };
   const repository = new PostgresArticleRepository({
     async query(statement, params) {
-      queries.push({ statement, params });
+      const normalized = normalizeQuery(statement);
+      queries.push({ statement: normalized, params });
+
+      if (normalized.includes("AND (slug = 'default' OR lower(name) = 'default')")) {
+        return [defaultFolder];
+      }
+
+      if (normalized.startsWith("UPDATE articles SET folder_id")) {
+        return [];
+      }
+
       return [
         {
           id: "article-1",
@@ -74,10 +92,16 @@ test("library listing selects and returns summary fields only", async () => {
   });
 
   const summaries = await repository.list(" Reader@Example.com ");
-  const normalizedQuery = normalizeQuery(queries[0].statement);
+  const normalizedQuery = queries[2].statement;
 
-  assert.equal(queries.length, 1);
+  assert.equal(queries.length, 3);
   assert.deepEqual(queries[0].params, ["reader@example.com"]);
+  assert.deepEqual(queries[1].params, [
+    "reader@example.com",
+    "folder-default",
+  ]);
+  assert.deepEqual(queries[2].params, ["reader@example.com"]);
+  assert.match(queries[1].statement, /folder_id IS NULL/);
   assert.doesNotMatch(normalizedQuery, /\bcontent_html\b/);
   assert.match(normalizedQuery, /\bexcerpt\b/);
   assert.match(normalizedQuery, /\bthumbnail_url\b/);

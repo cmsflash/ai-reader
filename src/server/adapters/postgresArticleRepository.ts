@@ -87,6 +87,17 @@ export class PostgresArticleRepository implements ArticleRepository {
   }
 
   async list(ownerEmail: string) {
+    const normalizedOwner = normalizeOwnerEmail(ownerEmail);
+    const defaultFolder = await this.ensureDefaultFolder(normalizedOwner);
+    await this.queryRows<{ id: string }>(
+      `
+        UPDATE articles
+        SET folder_id = $2
+        WHERE owner_email = $1 AND folder_id IS NULL
+        RETURNING id
+      `,
+      [normalizedOwner, defaultFolder.id],
+    );
     const rows = await this.queryRows<PostgresArticleSummaryRow>(
       `
         SELECT ${articleSummaryColumns}
@@ -94,7 +105,7 @@ export class PostgresArticleRepository implements ArticleRepository {
         WHERE owner_email = $1
         ORDER BY created_at DESC
       `,
-      [normalizeOwnerEmail(ownerEmail)],
+      [normalizedOwner],
     );
 
     return rows.map(rowToArticleSummary);
