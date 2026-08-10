@@ -51,15 +51,3 @@ SET folder_id = (
   LIMIT 1
 )
 WHERE article.folder_id IS NULL;
-
-ALTER TABLE articles
-  DROP CONSTRAINT IF EXISTS articles_folder_id_fkey;
-
-ALTER TABLE articles
-  ALTER COLUMN folder_id SET NOT NULL;
-
-ALTER TABLE articles
-  ADD CONSTRAINT articles_folder_id_fkey
-  FOREIGN KEY (folder_id)
-  REFERENCES reading_folders (id)
-  ON DELETE RESTRICT;

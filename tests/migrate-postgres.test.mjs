@@ -22,19 +22,18 @@ test("discussion migration is safe for the replay-only migration runner", async 
   assert.match(statements[2], /owner_email, article_id, sequence/);
 });
 
-test("default-folder migration removes the nullable unfiled state", async () => {
+test("default-folder migration backfills the legacy unfiled state", async () => {
   const migration = await readFile(
     new URL("../migrations/012_default_folder.sql", import.meta.url),
     "utf8",
   );
   const statements = splitStatements(migration);
 
-  assert.equal(statements.length, 6);
+  assert.equal(statements.length, 3);
   assert.match(statements[0], /'Default'/);
   assert.match(statements[0], /NOT EXISTS/);
   assert.match(statements[2], /WHERE article\.folder_id IS NULL/);
-  assert.match(statements[4], /ALTER COLUMN folder_id SET NOT NULL/);
-  assert.match(statements[5], /ON DELETE RESTRICT/);
+  assert.doesNotMatch(migration, /SET NOT NULL|ON DELETE RESTRICT/);
 });
 
 test("fingerprint backfill leaves historical duplicates unindexed and is idempotent", async () => {
