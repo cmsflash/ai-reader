@@ -47,6 +47,7 @@ import {
 import {
   articleImageSourceCandidates,
   proxiedImageSrc,
+  shouldLoadArticleImageEagerly,
 } from "@/lib/articleImage";
 import { sentenceHighlightState } from "@/lib/sentenceHighlight";
 import {
@@ -3557,7 +3558,11 @@ function ArticleImageBlock({
         <img
           src={src}
           alt={block.alt}
-          loading={sources.length > 1 ? "eager" : "lazy"}
+          loading={
+            shouldLoadArticleImageEagerly(block.src, block.originalSrc)
+              ? "eager"
+              : "lazy"
+          }
           onError={() => {
             setSourceIndex((current) => Math.min(current + 1, sources.length));
           }}

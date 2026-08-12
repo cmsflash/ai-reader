@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   articleImageSourceCandidates,
   proxiedImageSrc,
+  shouldLoadArticleImageEagerly,
 } from "../src/lib/articleImage.ts";
 
 test("falls back from a legacy artifact to a proxied original image", () => {
@@ -51,5 +52,31 @@ test("uses a valid original image when the primary source is absent", () => {
   assert.deepEqual(
     articleImageSourceCandidates(undefined, originalSrc),
     [proxiedImageSrc(originalSrc)],
+  );
+});
+
+test("loads only obsolete artifact images eagerly for fallback recovery", () => {
+  const originalSrc = "https://mmbiz.qpic.cn/example/640?wx_fmt=jpeg";
+
+  assert.equal(
+    shouldLoadArticleImageEagerly(
+      "/api/artifacts/articles/example/images/0.jpg",
+      originalSrc,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldLoadArticleImageEagerly(
+      "https://example.public.blob.vercel-storage.com/image.jpg",
+      originalSrc,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldLoadArticleImageEagerly(
+      "/api/artifacts/articles/example/images/0.jpg",
+      undefined,
+    ),
+    false,
   );
 });

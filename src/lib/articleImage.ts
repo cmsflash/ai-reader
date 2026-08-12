@@ -23,6 +23,16 @@ export function articleImageSourceCandidates(
   return candidates;
 }
 
+export function shouldLoadArticleImageEagerly(
+  src: string | undefined,
+  originalSrc: string | undefined,
+) {
+  return Boolean(
+    src?.trim().startsWith("/api/artifacts/") &&
+      remoteHttpSource(originalSrc),
+  );
+}
+
 export function proxiedImageSrc(src: string, sourceUrl?: string) {
   try {
     const imageUrl = new URL(src);
