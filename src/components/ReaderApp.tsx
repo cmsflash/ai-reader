@@ -288,6 +288,7 @@ export function ReaderApp() {
   const [articleLoadAttempt, setArticleLoadAttempt] = useState(0);
   const [isImporting, setIsImporting] = useState(false);
   const [isArticleLoading, setIsArticleLoading] = useState(false);
+  const [readerArchiveBusy, setReaderArchiveBusy] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [currentSentence, setCurrentSentence] = useState(0);
   const [contextSentenceIndex, setContextSentenceIndex] = useState<
@@ -1313,50 +1314,46 @@ export function ReaderApp() {
     [visibleArticles],
   );
 
+  const toggleArticleArchive = useCallback(
+    async (targetArticle: ArticleSummary | Article) => {
+      const { organization, undoPatch, wasArchived } = archiveChangeForArticle(
+        targetArticle,
+        folderById,
+        folders,
+      );
+
+      await updateOrganization(
+        targetArticle.id,
+        organization,
+        targetArticle,
+      );
+      setOrganizationNotice({
+        message: wasArchived
+          ? `Restored “${targetArticle.title}”.`
+          : `Archived “${targetArticle.title}”.`,
+        undo: {
+          articleId: targetArticle.id,
+          patch: undoPatch,
+          article: articleWithOrganizationState(
+            targetArticle,
+            organizationStateWithPatch(targetArticle, organization),
+          ),
+        },
+      });
+    },
+    [folderById, folders, updateOrganization],
+  );
+
   const handleArchiveFromActions = useCallback(async () => {
     if (!actionArticle) {
       return;
     }
 
-    const wasArchived = Boolean(actionArticle.archivedAt);
-    const currentFolder = actionArticle.folderId
-      ? folderById.get(actionArticle.folderId)
-      : undefined;
-    const defaultFolder =
-      folders.find(isDefaultFolder) ??
-      folders.find((folder) => !folder.isArchive);
-    const organization: OrganizationPatch = wasArchived
-      ? {
-          archived: false,
-          ...(currentFolder?.isArchive && defaultFolder
-            ? { folderId: defaultFolder.id }
-            : {}),
-        }
-      : { archived: true };
-    const undoPatch: OrganizationPatch = {
-      archived: wasArchived,
-      ...(wasArchived && currentFolder?.isArchive && actionArticle.folderId
-        ? { folderId: actionArticle.folderId }
-        : {}),
-    };
     setArticleActionBusy(true);
     setArticleActionError(null);
 
     try {
-      await updateOrganization(actionArticle.id, organization, actionArticle);
-      setOrganizationNotice({
-        message: wasArchived
-          ? `Restored “${actionArticle.title}”.`
-          : `Archived “${actionArticle.title}”.`,
-        undo: {
-          articleId: actionArticle.id,
-          patch: undoPatch,
-          article: articleWithOrganizationState(
-            actionArticle,
-            organizationStateWithPatch(actionArticle, organization),
-          ),
-        },
-      });
+      await toggleArticleArchive(actionArticle);
       closeArticleActions(false);
       focusAfterLibraryRemoval(actionArticle.id);
     } catch (actionError) {
@@ -1368,9 +1365,7 @@ export function ReaderApp() {
     actionArticle,
     closeArticleActions,
     focusAfterLibraryRemoval,
-    folderById,
-    folders,
-    updateOrganization,
+    toggleArticleArchive,
   ]);
 
   const moveArticleToFolder = useCallback(
@@ -1956,24 +1951,28 @@ export function ReaderApp() {
     }
   }
 
-  async function handleDeleteArticle() {
-    if (!selectedId) {
+  async function handleArchiveArticle() {
+    if (!article || readerArchiveBusy) {
       return;
     }
 
-    const confirmed = window.confirm("Delete this saved article?");
-
-    if (!confirmed) {
-      return;
-    }
-
+    const archivingArticle = article;
     stopSpeaking();
     setError(null);
+    setReaderArchiveBusy(true);
 
     try {
-      await deleteArticleById(selectedId);
-    } catch (deleteError) {
-      setError(messageFromError(deleteError));
+      await toggleArticleArchive(archivingArticle);
+
+      if (articleIdRef.current === archivingArticle.id) {
+        replaceWithLibrary();
+      }
+    } catch (archiveError) {
+      if (articleIdRef.current === archivingArticle.id) {
+        setError(messageFromError(archiveError));
+      }
+    } finally {
+      setReaderArchiveBusy(false);
     }
   }
 
@@ -2031,6 +2030,11 @@ export function ReaderApp() {
   }
 
   const readableProgress = article ? progressRatio(article) : 0;
+  const readerArchiveLabel = readerArchiveBusy
+    ? "Updating archive status"
+    : article?.archivedAt
+      ? "Restore article"
+      : "Archive article";
   const playingSentenceIndex = isSpeaking ? currentSentence : null;
   const firstContentBlockIndex = annotated.blocks.findIndex(
     annotatedBlockHasContent,
@@ -2682,13 +2686,19 @@ export function ReaderApp() {
                   />
                 </label>
                 <button
-                  className="round-button danger"
+                  className="round-button"
                   type="button"
-                  title="Delete"
-                  aria-label="Delete"
-                  onClick={() => void handleDeleteArticle()}
+                  title={readerArchiveLabel}
+                  aria-label={readerArchiveLabel}
+                  aria-busy={readerArchiveBusy || undefined}
+                  disabled={readerArchiveBusy}
+                  onClick={() => void handleArchiveArticle()}
                 >
-                  <Trash2 size={19} />
+                  {readerArchiveBusy ? (
+                    <RefreshCw className="spin" size={19} aria-hidden="true" />
+                  ) : (
+                    <Archive size={19} />
+                  )}
                 </button>
               </div>
             ) : null}
@@ -3814,6 +3824,36 @@ function folderIdForLocation(
   return location.startsWith("folder:")
     ? location.slice("folder:".length)
     : null;
+}
+
+function archiveChangeForArticle(
+  article: ArticleSummary | Article,
+  folderById: ReadonlyMap<string, ArticleFolder>,
+  folders: ArticleFolder[],
+) {
+  const wasArchived = Boolean(article.archivedAt);
+  const currentFolder = article.folderId
+    ? folderById.get(article.folderId)
+    : undefined;
+  const defaultFolder =
+    folders.find(isDefaultFolder) ??
+    folders.find((folder) => !folder.isArchive);
+  const organization: OrganizationPatch = wasArchived
+    ? {
+        archived: false,
+        ...(currentFolder?.isArchive && defaultFolder
+          ? { folderId: defaultFolder.id }
+          : {}),
+      }
+    : { archived: true };
+  const undoPatch: OrganizationPatch = {
+    archived: wasArchived,
+    ...(wasArchived && currentFolder?.isArchive && article.folderId
+      ? { folderId: article.folderId }
+      : {}),
+  };
+
+  return { organization, undoPatch, wasArchived };
 }
 
 function organizationStateFromArticle(
