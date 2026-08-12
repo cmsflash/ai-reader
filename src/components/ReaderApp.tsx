@@ -1562,6 +1562,23 @@ export function ReaderApp() {
     const viewportTop = viewport?.offsetTop ?? 0;
     const viewportWidth = viewport?.width ?? window.innerWidth;
     const viewportHeight = viewport?.height ?? window.innerHeight;
+    const readerBounds =
+      root.closest<HTMLElement>(".reader-panel")?.getBoundingClientRect() ??
+      null;
+    const actionAreaLeft = Math.max(
+      viewportLeft + gutter,
+      readerBounds ? readerBounds.left + gutter : viewportLeft + gutter,
+    );
+    const actionAreaRight = Math.min(
+      viewportLeft + viewportWidth - gutter,
+      readerBounds
+        ? readerBounds.right - gutter
+        : viewportLeft + viewportWidth - gutter,
+    );
+    const maximumActionLeft = Math.max(
+      actionAreaLeft,
+      actionAreaRight - actionWidth,
+    );
     const aboveSelection = bounds.top - 48;
     const top =
       aboveSelection >= viewportTop + gutter
@@ -1577,9 +1594,9 @@ export function ReaderApp() {
       left: Math.min(
         Math.max(
           bounds.left + bounds.width / 2 - actionWidth / 2,
-          viewportLeft + gutter,
+          actionAreaLeft,
         ),
-        viewportLeft + viewportWidth - actionWidth - gutter,
+        maximumActionLeft,
       ),
       top,
     });
@@ -3468,21 +3485,18 @@ function SentenceChunks({
 }
 
 function useArticleDiscussionMode(): ArticleDiscussionMode {
-  const [mode, setMode] = useState<ArticleDiscussionMode>("overlay");
+  const [mode, setMode] = useState<ArticleDiscussionMode>("dock");
 
   useEffect(() => {
-    const desktop = window.matchMedia("(min-width: 1200px)");
     const phone = window.matchMedia("(max-width: 700px)");
     const updateMode = () => {
-      setMode(desktop.matches ? "dock" : phone.matches ? "sheet" : "overlay");
+      setMode(phone.matches ? "sheet" : "dock");
     };
 
     updateMode();
-    desktop.addEventListener("change", updateMode);
     phone.addEventListener("change", updateMode);
 
     return () => {
-      desktop.removeEventListener("change", updateMode);
       phone.removeEventListener("change", updateMode);
     };
   }, []);

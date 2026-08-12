@@ -354,10 +354,22 @@ export function ArticleDiscussion({
         ? document.activeElement
         : null;
     const returnFocus = returnFocusRef?.current;
+    const drawer = drawerRef.current;
 
     return () => {
+      const activeElement = document.activeElement;
+      const shouldRestoreFocus =
+        modal ||
+        !(activeElement instanceof HTMLElement) ||
+        activeElement === document.body ||
+        drawer?.contains(activeElement) === true;
       const previous = previouslyFocusedRef.current;
       previouslyFocusedRef.current = null;
+
+      if (!shouldRestoreFocus) {
+        return;
+      }
+
       window.requestAnimationFrame(() => {
         const target =
           previous?.isConnected && !previous.hasAttribute("inert")
@@ -366,7 +378,7 @@ export function ArticleDiscussion({
         target?.focus({ preventScroll: true });
       });
     };
-  }, [open, returnFocusRef]);
+  }, [modal, open, returnFocusRef]);
 
   useEffect(() => {
     if (!open || resolvedMode === "sheet") {
@@ -1112,27 +1124,22 @@ export function ArticleDiscussion({
 
 function useResolvedDiscussionMode(mode?: ArticleDiscussionMode) {
   const [automaticMode, setAutomaticMode] =
-    useState<ArticleDiscussionMode>("overlay");
+    useState<ArticleDiscussionMode>("dock");
 
   useEffect(() => {
     if (mode) {
       return;
     }
 
-    const dockQuery = window.matchMedia("(min-width: 1200px)");
     const sheetQuery = window.matchMedia("(max-width: 700px)");
     const updateMode = () => {
-      setAutomaticMode(
-        sheetQuery.matches ? "sheet" : dockQuery.matches ? "dock" : "overlay",
-      );
+      setAutomaticMode(sheetQuery.matches ? "sheet" : "dock");
     };
 
     updateMode();
-    dockQuery.addEventListener("change", updateMode);
     sheetQuery.addEventListener("change", updateMode);
 
     return () => {
-      dockQuery.removeEventListener("change", updateMode);
       sheetQuery.removeEventListener("change", updateMode);
     };
   }, [mode]);

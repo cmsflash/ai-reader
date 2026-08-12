@@ -4350,7 +4350,7 @@ input[type="range"] {
 
 /* Responsive discussion shell: authoritative layout overrides. */
 :root {
-  --discussion-pane-width: clamp(360px, 30vw, 440px);
+  --discussion-pane-width: clamp(320px, 32vw, 440px);
 }
 
 .discussion-drawer:is(
@@ -4383,17 +4383,65 @@ input[type="range"] {
   height: 100dvh;
   border-width: 0 0 0 1px;
   border-radius: 0;
-  box-shadow: -12px 0 34px color-mix(in srgb, var(--scrim) 18%, transparent);
+  box-shadow: none;
 }
 
-@media (min-width: 1200px) {
-  .reader-app.view-reader .reader-panel {
-    margin-right: auto;
-    transition: width 180ms ease;
+@media (width > 700px) {
+  .reader-app.view-reader {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 0;
+    align-items: start;
+    transition: grid-template-columns 180ms ease;
   }
 
-  .reader-app.view-reader.discussion-open.discussion-mode-dock .reader-panel {
-    width: calc(100% - var(--discussion-pane-width));
+  .reader-app.view-reader.discussion-open.discussion-mode-dock {
+    grid-template-columns: minmax(0, 1fr) var(--discussion-pane-width);
+  }
+
+  .reader-app.view-reader .reader-panel {
+    grid-row: 1;
+    grid-column: 1;
+    width: 100%;
+  }
+
+  .discussion-drawer.discussion-mode-dock {
+    position: sticky;
+    z-index: 21;
+    top: 0;
+    right: auto;
+    bottom: auto;
+    grid-row: 1;
+    grid-column: 2;
+    width: 100%;
+    height: 100dvh;
+  }
+}
+
+@media (700px < width <= 820px) {
+  .reader-app.view-reader.discussion-open.discussion-mode-dock
+    .reader-toolbar {
+    gap: 6px;
+    padding-inline: 8px;
+  }
+
+  .reader-app.view-reader.discussion-open.discussion-mode-dock
+    .reader-toolbar-context,
+  .reader-app.view-reader.discussion-open.discussion-mode-dock
+    .reader-back-button
+    span,
+  .reader-app.view-reader.discussion-open.discussion-mode-dock
+    .discuss-article-button
+    span {
+    display: none;
+  }
+
+  .reader-app.view-reader.discussion-open.discussion-mode-dock
+    .reader-back-button,
+  .reader-app.view-reader.discussion-open.discussion-mode-dock
+    .discuss-article-button {
+    width: 44px;
+    min-width: 44px;
+    padding-inline: 0;
   }
 }
 
@@ -4761,7 +4809,7 @@ input[type="range"] {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .reader-app.view-reader .reader-panel,
+  .reader-app.view-reader,
   .discussion-drawer.discussion-mode-sheet {
     transition: none;
   }
