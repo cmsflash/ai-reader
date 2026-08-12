@@ -44,6 +44,7 @@ import {
   type AnnotatedBlock,
   type SentenceSegment,
 } from "@/lib/sentences";
+import { sentenceHighlightState } from "@/lib/sentenceHighlight";
 import {
   integrationSyncMaxRequests,
   integrationSyncRequestBatchSize,
@@ -289,6 +290,9 @@ export function ReaderApp() {
   const [isArticleLoading, setIsArticleLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [currentSentence, setCurrentSentence] = useState(0);
+  const [contextSentenceIndex, setContextSentenceIndex] = useState<
+    number | null
+  >(null);
   const [rate, setRate] = useState(1);
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
   const [integrationStatus, setIntegrationStatus] =
@@ -477,12 +481,46 @@ export function ReaderApp() {
     setDiscussionScope(wholeArticleDiscussionScope);
     setDiscussionPhoneSnap("half");
     setSelectionDiscussionAction(null);
+    setContextSentenceIndex(null);
   }, [selectedId]);
+
+  useEffect(() => {
+    if (contextSentenceIndex === null) {
+      return;
+    }
+
+    const clearContextSentence = () => setContextSentenceIndex(null);
+    const clearContextSentenceOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        clearContextSentence();
+      }
+    };
+
+    document.addEventListener("pointerdown", clearContextSentence, true);
+    document.addEventListener(
+      "keydown",
+      clearContextSentenceOnEscape,
+      true,
+    );
+
+    return () => {
+      document.removeEventListener("pointerdown", clearContextSentence, true);
+      document.removeEventListener(
+        "keydown",
+        clearContextSentenceOnEscape,
+        true,
+      );
+    };
+  }, [contextSentenceIndex]);
 
   useEffect(() => {
     if (appView !== "library") {
       setArticleActions(null);
       setArticleActionError(null);
+    }
+
+    if (appView !== "reader") {
+      setContextSentenceIndex(null);
     }
   }, [appView]);
 
@@ -1602,6 +1640,26 @@ export function ReaderApp() {
     });
   }, []);
 
+  const handleSentenceContextMenu = useCallback(
+    (event: ReactMouseEvent<HTMLElement>) => {
+      const sentence =
+        event.target instanceof Element
+          ? event.target.closest<HTMLElement>(".sentence[data-sentence-index]")
+          : null;
+
+      if (!sentence || !event.currentTarget.contains(sentence)) {
+        setContextSentenceIndex(null);
+        return;
+      }
+
+      const sentenceIndex = Number(sentence.dataset.sentenceIndex);
+      setContextSentenceIndex(
+        Number.isInteger(sentenceIndex) ? sentenceIndex : null,
+      );
+    },
+    [],
+  );
+
   useEffect(() => {
     if (
       appView !== "reader" ||
@@ -1973,6 +2031,7 @@ export function ReaderApp() {
   }
 
   const readableProgress = article ? progressRatio(article) : 0;
+  const playingSentenceIndex = isSpeaking ? currentSentence : null;
   const firstContentBlockIndex = annotated.blocks.findIndex(
     annotatedBlockHasContent,
   );
@@ -2700,6 +2759,7 @@ export function ReaderApp() {
                 <article
                   ref={articleBodyRef}
                   className="article-body"
+                  onContextMenu={handleSentenceContextMenu}
                   onPointerUp={captureArticleSelection}
                   onKeyUp={captureArticleSelection}
                 >
@@ -2720,7 +2780,8 @@ export function ReaderApp() {
                       {leadingTitleBlock ? (
                         <SentenceChunks
                           chunks={leadingTitleBlock.chunks}
-                          currentSentence={currentSentence}
+                          playingSentenceIndex={playingSentenceIndex}
+                          contextSentenceIndex={contextSentenceIndex}
                           onSentenceTap={handleSentenceTap}
                         />
                       ) : (
@@ -2745,7 +2806,8 @@ export function ReaderApp() {
                       key={block.id}
                       block={block}
                       articleSourceUrl={article.sourceUrl}
-                      currentSentence={currentSentence}
+                      playingSentenceIndex={playingSentenceIndex}
+                      contextSentenceIndex={contextSentenceIndex}
                       onSentenceTap={handleSentenceTap}
                     />
                   ))}
@@ -3295,12 +3357,14 @@ function ParsingReader({ pendingImport }: { pendingImport: PendingImport }) {
 function ArticleBlockView({
   block,
   articleSourceUrl,
-  currentSentence,
+  playingSentenceIndex,
+  contextSentenceIndex,
   onSentenceTap,
 }: {
   block: AnnotatedBlock;
   articleSourceUrl?: string;
-  currentSentence: number;
+  playingSentenceIndex: number | null;
+  contextSentenceIndex: number | null;
   onSentenceTap: (sentenceIndex: number) => void;
 }) {
   if (block.type === "heading") {
@@ -3310,7 +3374,8 @@ function ArticleBlockView({
       <HeadingTag>
         <SentenceChunks
           chunks={block.chunks}
-          currentSentence={currentSentence}
+          playingSentenceIndex={playingSentenceIndex}
+          contextSentenceIndex={contextSentenceIndex}
           onSentenceTap={onSentenceTap}
         />
       </HeadingTag>
@@ -3322,7 +3387,8 @@ function ArticleBlockView({
       <blockquote>
         <SentenceChunks
           chunks={block.chunks}
-          currentSentence={currentSentence}
+          playingSentenceIndex={playingSentenceIndex}
+          contextSentenceIndex={contextSentenceIndex}
           onSentenceTap={onSentenceTap}
         />
       </blockquote>
@@ -3335,7 +3401,8 @@ function ArticleBlockView({
         <code>
           <SentenceChunks
             chunks={block.chunks}
-            currentSentence={currentSentence}
+            playingSentenceIndex={playingSentenceIndex}
+            contextSentenceIndex={contextSentenceIndex}
             onSentenceTap={onSentenceTap}
           />
         </code>
@@ -3352,7 +3419,8 @@ function ArticleBlockView({
           <li key={`${block.id}-${index}`}>
             <SentenceChunks
               chunks={chunks}
-              currentSentence={currentSentence}
+              playingSentenceIndex={playingSentenceIndex}
+              contextSentenceIndex={contextSentenceIndex}
               onSentenceTap={onSentenceTap}
             />
           </li>
@@ -3380,7 +3448,8 @@ function ArticleBlockView({
           <figcaption>
             <SentenceChunks
               chunks={block.chunks}
-              currentSentence={currentSentence}
+              playingSentenceIndex={playingSentenceIndex}
+              contextSentenceIndex={contextSentenceIndex}
               onSentenceTap={onSentenceTap}
             />
           </figcaption>
@@ -3396,7 +3465,8 @@ function ArticleBlockView({
           <figcaption>
             <SentenceChunks
               chunks={block.captionChunks}
-              currentSentence={currentSentence}
+              playingSentenceIndex={playingSentenceIndex}
+              contextSentenceIndex={contextSentenceIndex}
               onSentenceTap={onSentenceTap}
             />
           </figcaption>
@@ -3421,7 +3491,8 @@ function ArticleBlockView({
                         {chunks.length > 0 ? (
                           <SentenceChunks
                             chunks={chunks}
-                            currentSentence={currentSentence}
+                            playingSentenceIndex={playingSentenceIndex}
+                            contextSentenceIndex={contextSentenceIndex}
                             onSentenceTap={onSentenceTap}
                           />
                         ) : (
@@ -3443,7 +3514,8 @@ function ArticleBlockView({
     <p>
       <SentenceChunks
         chunks={block.chunks}
-        currentSentence={currentSentence}
+        playingSentenceIndex={playingSentenceIndex}
+        contextSentenceIndex={contextSentenceIndex}
         onSentenceTap={onSentenceTap}
       />
     </p>
@@ -3452,36 +3524,44 @@ function ArticleBlockView({
 
 function SentenceChunks({
   chunks,
-  currentSentence,
+  playingSentenceIndex,
+  contextSentenceIndex,
   onSentenceTap,
 }: {
   chunks: SentenceSegment[];
-  currentSentence: number;
+  playingSentenceIndex: number | null;
+  contextSentenceIndex: number | null;
   onSentenceTap: (sentenceIndex: number) => void;
 }) {
-  return chunks.map((chunk, index) => (
-    <span
-      key={chunk.sentenceIndex}
-      className={`sentence ${chunk.sentenceIndex === currentSentence ? "active" : ""}`}
-      data-sentence-index={chunk.sentenceIndex}
-      aria-current={
-        chunk.sentenceIndex === currentSentence ? "true" : undefined
-      }
-      role="button"
-      tabIndex={0}
-      onClick={() => onSentenceTap(chunk.sentenceIndex)}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onSentenceTap(chunk.sentenceIndex);
-        }
-      }}
-      title="Double-tap to resume"
-    >
-      {chunk.text}
-      {index < chunks.length - 1 ? " " : ""}
-    </span>
-  ));
+  return chunks.map((chunk, index) => {
+    const highlightState = sentenceHighlightState(
+      chunk.sentenceIndex,
+      playingSentenceIndex,
+      contextSentenceIndex,
+    );
+
+    return (
+      <span
+        key={chunk.sentenceIndex}
+        className={`sentence${highlightState ? ` ${highlightState}` : ""}`}
+        data-sentence-index={chunk.sentenceIndex}
+        aria-current={highlightState === "playing" ? "true" : undefined}
+        role="button"
+        tabIndex={0}
+        onClick={() => onSentenceTap(chunk.sentenceIndex)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSentenceTap(chunk.sentenceIndex);
+          }
+        }}
+        title="Double-tap to resume"
+      >
+        {chunk.text}
+        {index < chunks.length - 1 ? " " : ""}
+      </span>
+    );
+  });
 }
 
 function useArticleDiscussionMode(): ArticleDiscussionMode {

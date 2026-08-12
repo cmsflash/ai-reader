@@ -931,16 +931,13 @@ button:disabled {
   user-select: text;
 }
 
-.sentence:hover {
-  background: #fff1bf;
-}
-
 .sentence:focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: 2px;
 }
 
-.sentence.active {
+.sentence.playing,
+.sentence.context-selected {
   background: #dcefea;
   box-shadow: 0 0 0 2px rgba(39, 108, 93, 0.16);
 }
@@ -2124,11 +2121,6 @@ body {
   overflow-wrap: anywhere;
 }
 
-.article-document-header h1 .sentence.active {
-  background: transparent;
-  box-shadow: none;
-}
-
 .article-document-header .article-meta-row {
   margin-top: 18px;
   font-family:
@@ -2198,11 +2190,8 @@ body {
   border-radius: 3px;
 }
 
-.sentence:hover {
-  background: #f8efcf;
-}
-
-.sentence.active {
+.sentence.playing,
+.sentence.context-selected {
   background: #e7f3fa;
   box-shadow: 0 0 0 2px rgba(40, 119, 173, 0.1);
 }
@@ -3425,18 +3414,10 @@ input[type="range"] {
   border-color: var(--line);
 }
 
-.sentence:hover {
-  background: var(--warning-soft);
-}
-
-.sentence.active {
+.sentence.playing,
+.sentence.context-selected {
   background: var(--accent-soft);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent);
-}
-
-.article-document-header h1 .sentence.active {
-  background: transparent;
-  box-shadow: none;
 }
 
 .discussion-scrim {
@@ -3737,7 +3718,8 @@ input[type="range"] {
 
 @media (forced-colors: active) {
   .article-row.selected,
-  .sentence.active {
+  .sentence.playing,
+  .sentence.context-selected {
     outline: 2px solid Highlight;
     outline-offset: 2px;
   }
