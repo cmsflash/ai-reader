@@ -341,6 +341,67 @@ test("preserves mixed direct text, line breaks, nested lists, and absolute image
   );
 });
 
+test("preserves hidden WeChat content and resolves nested lazy images", async () => {
+  const article = await articleFromHtml(
+    `
+      <html><head><title>WeChat article</title></head><body>
+        <div
+          id="js_content"
+          class="rich_media_content"
+          style="visibility: hidden; opacity: 0;"
+        >
+          <p>Opening analysis appears before the first embedded illustration and explains why it matters to the reader.</p>
+          <section><span><a href="https://example.com/full-size">
+            <img
+              src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+              data-src="//mmbiz.qpic.cn/mmbiz_jpg/example-one/640?wx_fmt=jpeg&amp;wx_lazy=1&amp;wx_co=1"
+              alt="First WeChat illustration"
+            >
+          </a></span></section>
+          <p>Middle analysis keeps the two embedded illustrations in their original reading order.</p>
+          <section><span>
+            <img
+              data-src="https://mmbiz.qpic.cn/mmbiz_png/example-two/640?wx_fmt=png&amp;from=appmsg"
+              alt="Second WeChat illustration"
+            >
+          </span></section>
+          <p style="visibility: hidden">Hidden sharing controls should not become article text.</p>
+          ${articleParagraphs.map((paragraph) => `<p>${paragraph}</p>`).join("")}
+        </div>
+      </body></html>
+    `,
+    { sourceUrl: "https://mp.weixin.qq.com/s/example" },
+  );
+  const images = article.blocks.filter((block) => block.type === "image");
+
+  assert.deepEqual(
+    images.map((image) => image.src),
+    [
+      "https://mmbiz.qpic.cn/mmbiz_jpg/example-one/640?wx_fmt=jpeg&wx_lazy=1&wx_co=1",
+      "https://mmbiz.qpic.cn/mmbiz_png/example-two/640?wx_fmt=png&from=appmsg",
+    ],
+  );
+  assert.ok(
+    article.blocks.findIndex((block) => block.type === "paragraph") <
+      article.blocks.findIndex((block) => block === images[0]),
+  );
+  const middleParagraphIndex = article.blocks.findIndex(
+    (block) =>
+      block.type === "paragraph" &&
+      block.text.startsWith("Middle analysis"),
+  );
+  assert.ok(
+    article.blocks.findIndex((block) => block === images[0]) <
+      middleParagraphIndex,
+  );
+  assert.ok(
+    middleParagraphIndex <
+      article.blocks.findIndex((block) => block === images[1]),
+  );
+  assert.doesNotMatch(article.contentHtml, /data:image\//i);
+  assert.doesNotMatch(article.textContent, /Hidden sharing controls/);
+});
+
 test("decodes standalone HTML files using their declared charset", async () => {
   const body = articleParagraphs.join(" ");
   const html = Buffer.concat([

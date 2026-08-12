@@ -44,6 +44,10 @@ import {
   type AnnotatedBlock,
   type SentenceSegment,
 } from "@/lib/sentences";
+import {
+  articleImageSourceCandidates,
+  proxiedImageSrc,
+} from "@/lib/articleImage";
 import { sentenceHighlightState } from "@/lib/sentenceHighlight";
 import {
   integrationSyncMaxRequests,
@@ -2813,7 +2817,7 @@ export function ReaderApp() {
 
                   {visibleArticleBlocks.map((block) => (
                     <ArticleBlockView
-                      key={block.id}
+                      key={`${article.id}:${block.id}`}
                       block={block}
                       articleSourceUrl={article.sourceUrl}
                       playingSentenceIndex={playingSentenceIndex}
@@ -3440,31 +3444,14 @@ function ArticleBlockView({
   }
 
   if (block.type === "image") {
-    const src = block.src
-      ? proxiedImageSrc(block.src, articleSourceUrl)
-      : undefined;
-
     return (
-      <figure className="article-image-block">
-        {src ? (
-          // eslint-disable-next-line @next/next/no-img-element -- Article images come from arbitrary reader URLs.
-          <img src={src} alt={block.alt} loading="lazy" />
-        ) : (
-          <div className="image-placeholder" aria-hidden="true">
-            Image
-          </div>
-        )}
-        {block.chunks.length > 0 ? (
-          <figcaption>
-            <SentenceChunks
-              chunks={block.chunks}
-              playingSentenceIndex={playingSentenceIndex}
-              contextSentenceIndex={contextSentenceIndex}
-              onSentenceTap={onSentenceTap}
-            />
-          </figcaption>
-        ) : null}
-      </figure>
+      <ArticleImageBlock
+        block={block}
+        articleSourceUrl={articleSourceUrl}
+        playingSentenceIndex={playingSentenceIndex}
+        contextSentenceIndex={contextSentenceIndex}
+        onSentenceTap={onSentenceTap}
+      />
     );
   }
 
@@ -3529,6 +3516,68 @@ function ArticleBlockView({
         onSentenceTap={onSentenceTap}
       />
     </p>
+  );
+}
+
+function ArticleImageBlock({
+  block,
+  articleSourceUrl,
+  playingSentenceIndex,
+  contextSentenceIndex,
+  onSentenceTap,
+}: {
+  block: Extract<AnnotatedBlock, { type: "image" }>;
+  articleSourceUrl?: string;
+  playingSentenceIndex: number | null;
+  contextSentenceIndex: number | null;
+  onSentenceTap: (sentenceIndex: number) => void;
+}) {
+  const sources = useMemo(
+    () =>
+      articleImageSourceCandidates(
+        block.src,
+        block.originalSrc,
+        articleSourceUrl,
+      ),
+    [articleSourceUrl, block.originalSrc, block.src],
+  );
+  const sourceIdentity = sources.join("\0");
+  const [sourceIndex, setSourceIndex] = useState(0);
+
+  useEffect(() => {
+    setSourceIndex(0);
+  }, [sourceIdentity]);
+
+  const src = sources[sourceIndex];
+
+  return (
+    <figure className="article-image-block">
+      {src ? (
+        // eslint-disable-next-line @next/next/no-img-element -- Article images come from arbitrary reader URLs.
+        <img
+          src={src}
+          alt={block.alt}
+          loading="lazy"
+          onError={() => {
+            setSourceIndex((current) => Math.min(current + 1, sources.length));
+          }}
+        />
+      ) : (
+        <div className="image-placeholder" aria-hidden="true">
+          Image
+        </div>
+      )}
+      {block.chunks.length > 0 ? (
+        <figcaption>
+          <SentenceChunks
+            chunks={block.chunks}
+            playingSentenceIndex={playingSentenceIndex}
+            contextSentenceIndex={contextSentenceIndex}
+            onSentenceTap={onSentenceTap}
+          />
+        </figcaption>
+      ) : null}
+    </figure>
   );
 }
 
@@ -4070,24 +4119,4 @@ function formatCost(costUsd: number) {
 
 function roundCost(value: number) {
   return Math.round(value * 1_000_000) / 1_000_000;
-}
-
-function proxiedImageSrc(src: string, sourceUrl?: string) {
-  try {
-    const imageUrl = new URL(src);
-
-    if (!["http:", "https:"].includes(imageUrl.protocol)) {
-      return src;
-    }
-
-    const params = new URLSearchParams({ url: imageUrl.href });
-
-    if (sourceUrl) {
-      params.set("source", sourceUrl);
-    }
-
-    return `/api/image?${params.toString()}`;
-  } catch {
-    return src;
-  }
 }

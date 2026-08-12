@@ -42,7 +42,7 @@ registerHooks({
 const { archiveArticleArtifacts } = await import(
   "../src/server/artifacts/archiveArticleArtifacts.ts"
 );
-const { normalizedImageContentType } = await import(
+const { imageFetchHeaders, normalizedImageContentType } = await import(
   "../src/server/artifacts/imageRequests.ts"
 );
 
@@ -61,6 +61,21 @@ test("accepts extension-backed images served as generic binary data", () => {
     ),
     null,
   );
+});
+
+test("uses the WeChat article as referrer only for WeChat image hosts", () => {
+  const source = new URL("https://mp.weixin.qq.com/s/example?token=one");
+  const weChatHeaders = imageFetchHeaders(
+    new URL("https://mmbiz.qpic.cn/mmbiz_png/example/640?wx_fmt=png"),
+    source,
+  );
+  const unrelatedHeaders = imageFetchHeaders(
+    new URL("https://cdn.example.com/image.png"),
+    source,
+  );
+
+  assert.equal(weChatHeaders.get("referer"), source.href);
+  assert.equal(unrelatedHeaders.get("referer"), null);
 });
 
 test("stops best-effort image archiving at the article time budget", async () => {

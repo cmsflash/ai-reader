@@ -111,7 +111,16 @@ const allowedTags = [
 
 const allowedAttributes = {
   a: ["href", "name", "target", "rel"],
-  img: ["src", "alt", "title", "data-src", "data-original", "data-url"],
+  img: [
+    "src",
+    "alt",
+    "title",
+    "data-src",
+    "data-original",
+    "data-url",
+    "data-lazy-src",
+    "data-actualsrc",
+  ],
   code: ["class"],
   pre: ["class"],
 };
@@ -624,7 +633,7 @@ function extractHtmlTitle(
 function platformContentSelectors(source: URL) {
   const host = source.hostname.toLowerCase();
 
-  if (host === "mp.weixin.qq.com" || host.endsWith(".mp.weixin.qq.com")) {
+  if (isWeChatHost(host)) {
     return ["#js_content", ".rich_media_content"];
   }
 
@@ -641,6 +650,8 @@ function platformContentSelectors(source: URL) {
 }
 
 function removeNonReadableNodes(document: Document, source?: URL) {
+  const preserveHiddenWeChatArticle = source && isWeChatHost(source.hostname);
+
   document
     .querySelectorAll(
       [
@@ -672,7 +683,16 @@ function removeNonReadableNodes(document: Document, source?: URL) {
         ".ot-sdk-container",
       ].join(","),
     )
-    .forEach((element) => element.remove());
+    .forEach((element) => {
+      if (
+        preserveHiddenWeChatArticle &&
+        element.matches("#js_content, .rich_media_content")
+      ) {
+        return;
+      }
+
+      element.remove();
+    });
 
   if (source && isLinkedInHost(source.hostname)) {
     document
@@ -1642,18 +1662,8 @@ function visitElement(element: Element, blocks: ArticleBlock[]) {
     let inlineNodes: ChildNode[] = [];
 
     const flushInlineNodes = () => {
-      const inlineText = normalizeTextWithLineBreaks(
-        inlineNodes.map(nodeTextWithBreaks).join(""),
-      );
+      appendInlineContent(inlineNodes, blocks);
       inlineNodes = [];
-
-      if (inlineText) {
-        blocks.push({
-          id: blockId("paragraph", blocks.length),
-          type: "paragraph",
-          text: inlineText,
-        });
-      }
     };
 
     element.childNodes.forEach((child) => {
@@ -1671,11 +1681,58 @@ function visitElement(element: Element, blocks: ArticleBlock[]) {
     return;
   }
 
-  blocks.push({
-    id: blockId("paragraph", blocks.length),
-    type: "paragraph",
-    text,
-  });
+  appendInlineContent(Array.from(element.childNodes), blocks);
+}
+
+function appendInlineContent(nodes: ChildNode[], blocks: ArticleBlock[]) {
+  let text = "";
+
+  const flushText = () => {
+    const normalized = normalizeTextWithLineBreaks(text);
+    text = "";
+
+    if (normalized) {
+      blocks.push({
+        id: blockId("paragraph", blocks.length),
+        type: "paragraph",
+        text: normalized,
+      });
+    }
+  };
+
+  const visitNode = (node: ChildNode) => {
+    if (node.nodeType === 3) {
+      text += node.textContent ?? "";
+      return;
+    }
+
+    if (node.nodeType !== 1) {
+      return;
+    }
+
+    const element = node as Element;
+    const tag = element.tagName.toLowerCase();
+
+    if (tag === "br") {
+      text += "\n";
+      return;
+    }
+
+    if (tag === "img") {
+      flushText();
+      const image = imageBlockFromElement(element, blocks.length);
+
+      if (image) {
+        blocks.push(image);
+      }
+      return;
+    }
+
+    Array.from(element.childNodes).forEach(visitNode);
+  };
+
+  nodes.forEach(visitNode);
+  flushText();
 }
 
 function elementReadableBlockText(element: Element) {
@@ -1742,24 +1799,53 @@ function imageBlockFromElement(
 }
 
 function imageSourceFromElement(element: Element) {
-  const rawSource =
-    element.getAttribute("src") ||
-    element.getAttribute("data-src") ||
-    element.getAttribute("data-original") ||
-    element.getAttribute("data-url") ||
-    "";
+  const lazySources = [
+    element.getAttribute("data-src"),
+    element.getAttribute("data-original"),
+    element.getAttribute("data-url"),
+    element.getAttribute("data-lazy-src"),
+    element.getAttribute("data-actualsrc"),
+  ];
+  const primarySource = element.getAttribute("src");
+  const hasLazySource = lazySources.some((source) => normalizeText(source ?? ""));
+  const preferLazySource =
+    isWeChatDocument(element.ownerDocument) ||
+    (hasLazySource && isInlineImageSource(primarySource));
+  const candidates = preferLazySource
+    ? [...lazySources, primarySource]
+    : [primarySource, ...lazySources];
 
-  const source = normalizeText(rawSource);
+  for (const rawSource of candidates) {
+    const source = normalizeText(rawSource ?? "");
 
-  if (!source) {
-    return undefined;
+    if (!source || source === "#" || /^about:blank$/i.test(source)) {
+      continue;
+    }
+
+    try {
+      const resolved = new URL(source, element.ownerDocument.baseURI);
+
+      if (["http:", "https:", "data:"].includes(resolved.protocol)) {
+        return resolved.href;
+      }
+    } catch {
+      continue;
+    }
   }
 
+  return undefined;
+}
+
+function isWeChatDocument(document: Document) {
   try {
-    return new URL(source, element.ownerDocument.baseURI).href;
+    return isWeChatHost(new URL(document.baseURI).hostname);
   } catch {
-    return source;
+    return false;
   }
+}
+
+function isInlineImageSource(source: string | null) {
+  return /^data:image\//i.test(normalizeText(source ?? ""));
 }
 
 function figureCaption(element: Element) {
@@ -2143,6 +2229,11 @@ function blockSignature(block: ArticleBlock) {
 function isLinkedInHost(host: string) {
   const normalized = host.toLowerCase();
   return normalized === "linkedin.com" || normalized.endsWith(".linkedin.com");
+}
+
+function isWeChatHost(host: string) {
+  const normalized = host.toLowerCase();
+  return normalized === "mp.weixin.qq.com" || normalized.endsWith(".mp.weixin.qq.com");
 }
 
 function isLinkedInNoiseBlock(block: ArticleBlock) {
