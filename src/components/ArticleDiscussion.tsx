@@ -358,21 +358,21 @@ export function ArticleDiscussion({
 
     return () => {
       const activeElement = document.activeElement;
-      const shouldRestoreFocus =
-        modal ||
-        !(activeElement instanceof HTMLElement) ||
-        activeElement === document.body ||
-        drawer?.contains(activeElement) === true;
+      const preserveActiveFocus =
+        !modal &&
+        activeElement instanceof HTMLElement &&
+        activeElement !== document.body &&
+        drawer?.contains(activeElement) !== true;
       const previous = previouslyFocusedRef.current;
       previouslyFocusedRef.current = null;
 
-      if (!shouldRestoreFocus) {
-        return;
-      }
-
       window.requestAnimationFrame(() => {
         const target =
-          previous?.isConnected && !previous.hasAttribute("inert")
+          preserveActiveFocus &&
+          activeElement.isConnected &&
+          !activeElement.hasAttribute("inert")
+            ? activeElement
+            : previous?.isConnected && !previous.hasAttribute("inert")
             ? previous
             : returnFocus;
         target?.focus({ preventScroll: true });
