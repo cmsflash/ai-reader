@@ -1,23 +1,57 @@
 import { NextResponse } from "next/server";
 import {
+  ARTICLE_LIST_DEFAULT_PAGE_SIZE,
+  ARTICLE_LIST_MAX_PAGE_SIZE,
+  isArticleListLocation,
+  isArticleListSortMode,
+} from "@/lib/articleList";
+import {
   importFileArticle,
   importUrlArticle,
-  listArticleSummaries,
+  listArticleSummariesPage,
 } from "@/server/articles/articleService";
+import { ArticleListCursorError } from "@/server/articles/articleListCursor";
 import { requireAppUser } from "@/server/auth/access";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-export async function GET() {
+export async function GET(request: Request) {
   const auth = await requireAppUser();
 
   if (auth.response) {
     return auth.response;
   }
 
-  const articles = await listArticleSummaries(auth.user.ownerEmail);
-  return NextResponse.json({ articles });
+  let query: ReturnType<typeof parseArticleListQuery>;
+
+  try {
+    query = parseArticleListQuery(new URL(request.url).searchParams);
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Invalid article list query.",
+      },
+      { status: 400 },
+    );
+  }
+
+  try {
+    const page = await listArticleSummariesPage(auth.user.ownerEmail, query);
+    return NextResponse.json(page);
+  } catch (error) {
+    if (error instanceof ArticleListCursorError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+
+    return NextResponse.json(
+      { error: "Could not load the article list." },
+      { status: 500 },
+    );
+  }
 }
 
 export async function POST(request: Request) {
@@ -63,4 +97,46 @@ async function importFromForm(request: Request, ownerEmail: string) {
   }
 
   return importFileArticle(file, ownerEmail);
+}
+
+function parseArticleListQuery(searchParams: URLSearchParams) {
+  const location = searchParams.get("location") ?? "default";
+  const sort = searchParams.get("sort") ?? "saved-desc";
+  const rawLimit = searchParams.get("limit");
+  const cursor = searchParams.get("cursor") ?? undefined;
+
+  if (!isArticleListLocation(location)) {
+    throw new Error("Invalid article list location.");
+  }
+
+  if (!isArticleListSortMode(sort)) {
+    throw new Error("Invalid article list sort mode.");
+  }
+
+  if (cursor === "") {
+    throw new Error("Invalid article list cursor.");
+  }
+
+  let limit = ARTICLE_LIST_DEFAULT_PAGE_SIZE;
+
+  if (rawLimit !== null) {
+    if (!/^\d+$/u.test(rawLimit)) {
+      throw new Error("Article list limit must be a positive integer.");
+    }
+
+    const parsedLimit = Number(rawLimit);
+
+    if (!Number.isSafeInteger(parsedLimit) || parsedLimit < 1) {
+      throw new Error("Article list limit must be a positive integer.");
+    }
+
+    limit = Math.min(parsedLimit, ARTICLE_LIST_MAX_PAGE_SIZE);
+  }
+
+  return {
+    location,
+    sort,
+    limit,
+    ...(cursor ? { cursor } : {}),
+  };
 }

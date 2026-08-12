@@ -131,6 +131,89 @@ test("library listing selects and returns summary fields only", async () => {
   ]);
 });
 
+test("paged listing filters in SQL, returns totals, and skips legacy backfill", async () => {
+  const queries = [];
+  const defaultFolder = {
+    id: "folder-default",
+    name: "Default",
+    slug: "default",
+    is_archive: false,
+    created_at: "2026-08-11T07:00:00.000Z",
+    updated_at: "2026-08-11T07:00:00.000Z",
+  };
+  const repository = new PostgresArticleRepository({
+    async query(statement, params) {
+      const normalized = normalizeQuery(statement);
+      queries.push({ statement: normalized, params });
+
+      if (normalized.includes("AND (slug = 'default' OR lower(name) = 'default')")) {
+        return [defaultFolder];
+      }
+
+      if (normalized.startsWith("SELECT COUNT(*) FILTER")) {
+        return [{ total: "45", active_total: "50" }];
+      }
+
+      if (normalized.startsWith("SELECT id, title")) {
+        return [
+          articleSummaryRow("long", { estimated_minutes: 12 }),
+          articleSummaryRow("short", { estimated_minutes: 3 }),
+        ];
+      }
+
+      throw new Error(`Unexpected query: ${normalized}`);
+    },
+  });
+
+  const page = await repository.listPage(" Reader@Example.com ", {
+    location: "default",
+    sort: "duration-desc",
+    limit: 2,
+    offset: 30,
+  });
+  const countQuery = queries.find(({ statement }) =>
+    statement.startsWith("SELECT COUNT(*) FILTER"),
+  );
+  const pageQuery = queries.find(({ statement }) =>
+    statement.startsWith("SELECT id, title"),
+  );
+
+  assert.equal(queries.length, 3);
+  assert.ok(countQuery);
+  assert.ok(pageQuery);
+  assert.equal(
+    queries.some(({ statement }) => statement.startsWith("UPDATE articles")),
+    false,
+  );
+  assert.deepEqual(countQuery.params, [
+    "reader@example.com",
+    "folder-default",
+  ]);
+  assert.deepEqual(pageQuery.params, [
+    "reader@example.com",
+    "folder-default",
+    2,
+    30,
+  ]);
+  assert.match(
+    countQuery.statement,
+    /archived_at IS NULL AND folder_id = \$2/,
+  );
+  assert.match(
+    pageQuery.statement,
+    /ORDER BY estimated_minutes DESC, lower\(title\) COLLATE "C" ASC, created_at DESC, id ASC/,
+  );
+  assert.match(pageQuery.statement, /LIMIT \$3 OFFSET \$4$/);
+  assert.doesNotMatch(
+    pageQuery.statement,
+    /\bcontent_html\b|\btext_content\b|\bblocks\b/,
+  );
+  assert.deepEqual(page.articles.map(({ id }) => id), ["long", "short"]);
+  assert.equal(page.total, 45);
+  assert.equal(page.activeTotal, 50);
+  assert.equal(page.nextOffset, 32);
+});
+
 test("deduplication listing transfers only fields used by the matcher", async () => {
   const queries = [];
   const repository = new PostgresArticleRepository({
@@ -350,6 +433,29 @@ test("archive-only updates preserve the folder and null folder moves are rejecte
 
 function normalizeQuery(statement) {
   return statement.replace(/\s+/g, " ").trim();
+}
+
+function articleSummaryRow(id, overrides = {}) {
+  return {
+    id,
+    title: `Article ${id}`,
+    source_type: "url",
+    source_url: `https://example.com/${id}`,
+    folder_id: "folder-default",
+    archived_at: null,
+    created_at: "2026-08-11T08:00:00.000Z",
+    updated_at: "2026-08-11T09:00:00.000Z",
+    word_count: "420",
+    estimated_minutes: 2,
+    sentence_count: "18",
+    processing_cost_usd: "0.125",
+    progress_sentence_index: "4",
+    progress_percent: "0.25",
+    progress_updated_at: "2026-08-11T09:00:00.000Z",
+    excerpt: `Excerpt for ${id}`,
+    thumbnail_url: null,
+    ...overrides,
+  };
 }
 
 function resolveSourceFile(basePath) {

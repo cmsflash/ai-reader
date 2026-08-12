@@ -14,6 +14,7 @@ import type {
 } from "@/lib/types";
 import { articleContentFingerprint } from "@/server/articles/articleDeduplication";
 import {
+  type ArticleListPageQuery,
   type ArticleOrganizationPatch,
   type ArticleOrganizationResult,
   type ArticleProgressPatch,
@@ -68,6 +69,11 @@ type PostgresArticleOrganizationRow = {
   updated_at: string | Date;
 };
 
+type PostgresArticleListCountRow = {
+  total: number | string;
+  active_total: number | string;
+};
+
 type PostgresArticleDeduplicationRow = Pick<
   PostgresArticleRow,
   "id" | "title" | "source_url" | "text_content"
@@ -109,6 +115,71 @@ export class PostgresArticleRepository implements ArticleRepository {
     );
 
     return rows.map(rowToArticleSummary);
+  }
+
+  async listPage(ownerEmail: string, query: ArticleListPageQuery) {
+    if (
+      !Number.isSafeInteger(query.limit) ||
+      query.limit < 1 ||
+      !Number.isSafeInteger(query.offset) ||
+      query.offset < 0
+    ) {
+      throw new Error("Invalid article list page.");
+    }
+
+    const normalizedOwner = normalizeOwnerEmail(ownerEmail);
+    const folderId =
+      query.location === "default"
+        ? (await this.ensureDefaultFolder(normalizedOwner)).id
+        : query.location.startsWith("folder:")
+          ? query.location.slice("folder:".length)
+          : null;
+    const locationCondition = articleListLocationCondition(
+      query.location,
+      folderId,
+    );
+    const filterParams: unknown[] = [normalizedOwner];
+
+    if (folderId) {
+      filterParams.push(folderId);
+    }
+
+    const limitParameter = filterParams.length + 1;
+    const offsetParameter = filterParams.length + 2;
+    const [countRows, rows] = await Promise.all([
+      this.queryRows<PostgresArticleListCountRow>(
+        `
+          SELECT
+            COUNT(*) FILTER (WHERE ${locationCondition}) AS total,
+            COUNT(*) FILTER (WHERE archived_at IS NULL) AS active_total
+          FROM articles
+          WHERE owner_email = $1
+        `,
+        filterParams,
+      ),
+      this.queryRows<PostgresArticleSummaryRow>(
+        `
+          SELECT ${articleSummaryColumns}
+          FROM articles
+          WHERE owner_email = $1 AND ${locationCondition}
+          ORDER BY ${articleListOrderBy(query.sort)}
+          LIMIT $${limitParameter}
+          OFFSET $${offsetParameter}
+        `,
+        [...filterParams, query.limit, query.offset],
+      ),
+    ]);
+    const total = numberValue(countRows[0]?.total ?? 0);
+    const activeTotal = numberValue(countRows[0]?.active_total ?? 0);
+    const articles = rows.map(rowToArticleSummary);
+    const nextOffset = query.offset + articles.length;
+
+    return {
+      articles,
+      total,
+      activeTotal,
+      nextOffset: nextOffset < total ? nextOffset : null,
+    };
   }
 
   async listFolders(ownerEmail: string) {
@@ -797,6 +868,52 @@ function isoString(value: string | Date) {
 
 function numberValue(value: number | string) {
   return typeof value === "number" ? value : Number(value);
+}
+
+function articleListLocationCondition(
+  location: ArticleListPageQuery["location"],
+  folderId: string | null,
+) {
+  switch (location) {
+    case "archive":
+      return "archived_at IS NOT NULL";
+    case "all":
+      return "archived_at IS NULL";
+    case "default":
+      if (!folderId) {
+        throw new Error("Default folder is unavailable.");
+      }
+
+      return "archived_at IS NULL AND folder_id = $2";
+    default:
+      if (!folderId) {
+        throw new Error("Folder is required.");
+      }
+
+      return "archived_at IS NULL AND folder_id = $2";
+  }
+}
+
+function articleListOrderBy(sort: ArticleListPageQuery["sort"]) {
+  const titleAscending = `lower(title) COLLATE "C" ASC`;
+
+  switch (sort) {
+    case "saved-asc":
+      return `created_at ASC, ${titleAscending}, id ASC`;
+    case "read-desc":
+      return `progress_updated_at DESC, created_at DESC, ${titleAscending}, id ASC`;
+    case "title-asc":
+      return `${titleAscending}, created_at DESC, id ASC`;
+    case "duration-asc":
+      return `estimated_minutes ASC, ${titleAscending}, created_at DESC, id ASC`;
+    case "duration-desc":
+      return `estimated_minutes DESC, ${titleAscending}, created_at DESC, id ASC`;
+    case "saved-desc":
+      return `created_at DESC, ${titleAscending}, id ASC`;
+    default:
+      sort satisfies never;
+      return "id ASC";
+  }
 }
 
 function clampNumber(value: number, min: number, max: number) {

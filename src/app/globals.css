@@ -3802,6 +3802,41 @@ input[type="range"] {
   font-weight: 760;
 }
 
+.article-list-loader {
+  display: grid;
+  min-height: 88px;
+  place-items: center;
+  padding: 18px 0 10px;
+}
+
+.article-list-loader button {
+  min-width: 132px;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--accent-strong);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 760;
+  padding: 0 18px;
+}
+
+.article-list-loader button:hover,
+.article-list-loader button:focus-visible {
+  border-color: var(--accent);
+  background: var(--surface-subtle);
+}
+
+.article-list-loader button:disabled {
+  cursor: default;
+  opacity: 0.68;
+}
+
+.article-list-loader[aria-busy="true"] button {
+  cursor: progress;
+}
+
 .article-row,
 .article-row.selected,
 .article-row.pending,

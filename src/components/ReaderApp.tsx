@@ -51,16 +51,19 @@ import {
   shouldContinueIntegrationSync,
   type IntegrationSyncResponse,
 } from "@/lib/integrationSync";
+import {
+  ARTICLE_LIST_MAX_PAGE_SIZE,
+  articleMatchesLocation,
+  type ArticleListLocation,
+  type ArticleListPageResponse,
+  type ArticleListSortMode,
+} from "@/lib/articleList";
 import type {
   Article,
   ArticleFolder,
   ArticleSummary,
   SourceType,
 } from "@/lib/types";
-
-type ArticleListResponse = {
-  articles: ArticleSummary[];
-};
 
 type FolderListResponse = {
   folders: ArticleFolder[];
@@ -131,16 +134,6 @@ type IntegrationStatusResponse = {
 
 type IntegrationProvider = "instapaper" | "dropbox";
 
-type LibrarySortMode =
-  | "saved-desc"
-  | "saved-asc"
-  | "read-desc"
-  | "title-asc"
-  | "duration-asc"
-  | "duration-desc";
-
-type LibraryLocation = "all" | "archive" | `folder:${string}`;
-
 type ArticleActionState = {
   articleId: string;
   left: number;
@@ -158,11 +151,13 @@ type OrganizationNotice = {
   undo?: {
     articleId: string;
     patch: OrganizationPatch;
+    article: ArticleSummary;
   };
 };
 
 const wholeArticleDiscussionScope: ArticleDiscussionScope = { kind: "whole" };
 const maxDiscussionSelectionCharacters = 24_000;
+const articleListPageSize = 30;
 
 type SelectionDiscussionAction = {
   text: string;
@@ -271,6 +266,16 @@ function writeAppHistory(mode: "push" | "replace", entry: AppHistoryEntry) {
 
 export function ReaderApp() {
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
+  const [articleTotal, setArticleTotal] = useState(0);
+  const [activeArticleTotal, setActiveArticleTotal] = useState(0);
+  const [nextArticleCursor, setNextArticleCursor] = useState<string | null>(
+    null,
+  );
+  const [isLoadingMoreArticles, setIsLoadingMoreArticles] = useState(false);
+  const [articleListRefreshFailed, setArticleListRefreshFailed] =
+    useState(false);
+  const [articleListRefreshVersion, setArticleListRefreshVersion] =
+    useState(0);
   const [pendingImports, setPendingImports] = useState<PendingImport[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [article, setArticle] = useState<Article | null>(null);
@@ -310,9 +315,9 @@ export function ReaderApp() {
   const [appView, setAppView] = useState<AppView>("library");
   const [folders, setFolders] = useState<ArticleFolder[]>([]);
   const [libraryLocation, setLibraryLocation] =
-    useState<LibraryLocation>("all");
+    useState<ArticleListLocation>("default");
   const [librarySort, setLibrarySort] =
-    useState<LibrarySortMode>("saved-desc");
+    useState<ArticleListSortMode>("saved-desc");
   const [articleActions, setArticleActions] =
     useState<ArticleActionState | null>(null);
   const [articleActionBusy, setArticleActionBusy] = useState(false);
@@ -346,6 +351,12 @@ export function ReaderApp() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
   const articleActionReturnFocusRef = useRef<HTMLElement | null>(null);
+  const articleListGenerationRef = useRef(0);
+  const articleListLoadedCountRef = useRef(0);
+  const articleListLoadingMoreRef = useRef(false);
+  const articleListNeedsRefreshRef = useRef(false);
+  const articleListRequestLimitRef = useRef(articleListPageSize);
+  const articleListSentinelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const metadata = readHistoryMetadata();
@@ -375,19 +386,21 @@ export function ReaderApp() {
     () => folders.find(isDefaultFolder),
     [folders],
   );
-  const activeArticleCount = useMemo(
-    () => articles.filter((item) => !item.archivedAt).length,
-    [articles],
-  );
   const visibleArticles = useMemo(
-    () => filterAndSortArticles(articles, libraryLocation, librarySort),
-    [articles, libraryLocation, librarySort],
+    () =>
+      libraryLocation === "default" && !defaultFolder
+        ? articles
+        : articles.filter((articleSummary) =>
+            articleMatchesLocation(
+              articleSummary,
+              libraryLocation,
+              defaultFolder?.id,
+            ),
+          ),
+    [articles, defaultFolder, libraryLocation],
   );
   const showPendingImports =
-    libraryLocation === "all" ||
-    Boolean(
-      defaultFolder && libraryLocation === `folder:${defaultFolder.id}`,
-    );
+    libraryLocation === "all" || libraryLocation === "default";
   const libraryItems = useMemo(
     () => [
       ...(showPendingImports
@@ -507,21 +520,106 @@ export function ReaderApp() {
     rateRef.current = rate;
   }, [rate]);
 
-  const loadArticles = useCallback(async (showLoading = false) => {
-    if (showLoading) {
-      setStatus("Refreshing library...");
+  useEffect(() => {
+    articleListLoadedCountRef.current = articles.length;
+  }, [articles.length]);
+
+  const loadArticles = useCallback(
+    async (showLoading = false, clearExisting = false) => {
+      const generation = articleListGenerationRef.current + 1;
+      const requestLimit = clearExisting
+        ? articleListPageSize
+        : Math.min(
+            ARTICLE_LIST_MAX_PAGE_SIZE,
+            Math.max(articleListPageSize, articleListLoadedCountRef.current),
+          );
+      articleListGenerationRef.current = generation;
+      articleListRequestLimitRef.current = requestLimit;
+      articleListLoadingMoreRef.current = false;
+      setIsLoadingMoreArticles(false);
+      setArticleListRefreshFailed(false);
+      setNextArticleCursor(null);
+
+      if (showLoading) {
+        setStatus(clearExisting ? "Loading library..." : "Refreshing library...");
+      }
+
+      if (clearExisting) {
+        setArticles([]);
+        setArticleTotal(0);
+      }
+
+      try {
+        const data = await requestJson<ArticleListPageResponse>(
+          articleListUrl(libraryLocation, librarySort, undefined, requestLimit),
+        );
+
+        if (articleListGenerationRef.current !== generation) {
+          return;
+        }
+
+        setArticles(data.articles);
+        setArticleTotal(data.total);
+        setActiveArticleTotal(data.activeTotal);
+        setNextArticleCursor(data.nextCursor);
+        articleListNeedsRefreshRef.current = false;
+        setArticleListRefreshFailed(false);
+        setStatus(null);
+        setError(null);
+      } catch (loadError) {
+        if (articleListGenerationRef.current !== generation) {
+          return;
+        }
+
+        setError(messageFromError(loadError));
+        setArticleListRefreshFailed(!clearExisting);
+        setStatus(null);
+      }
+    },
+    [libraryLocation, librarySort],
+  );
+
+  const loadMoreArticles = useCallback(async () => {
+    const cursor = nextArticleCursor;
+
+    if (!cursor || articleListLoadingMoreRef.current) {
+      return;
     }
 
+    const generation = articleListGenerationRef.current;
+    articleListLoadingMoreRef.current = true;
+    setIsLoadingMoreArticles(true);
+
     try {
-      const data = await requestJson<ArticleListResponse>("/api/articles");
-      setArticles(data.articles);
-      setStatus(null);
+      const data = await requestJson<ArticleListPageResponse>(
+        articleListUrl(
+          libraryLocation,
+          librarySort,
+          cursor,
+          articleListRequestLimitRef.current,
+        ),
+      );
+
+      if (articleListGenerationRef.current !== generation) {
+        return;
+      }
+
+      setArticles((current) => mergeArticlePages(current, data.articles));
+      setArticleTotal(data.total);
+      setActiveArticleTotal(data.activeTotal);
+      setNextArticleCursor(data.nextCursor);
       setError(null);
     } catch (loadError) {
-      setError(messageFromError(loadError));
-      setStatus(null);
+      if (articleListGenerationRef.current === generation) {
+        setError(messageFromError(loadError));
+      }
+    } finally {
+      if (articleListGenerationRef.current === generation) {
+        articleListLoadingMoreRef.current = false;
+        setIsLoadingMoreArticles(false);
+      }
     }
-  }, []);
+  }, [libraryLocation, librarySort, nextArticleCursor]);
 
   const loadFolders = useCallback(async () => {
     try {
@@ -577,12 +675,47 @@ export function ReaderApp() {
   }, []);
 
   useEffect(() => {
-    void refreshLibrary(true);
-  }, [refreshLibrary]);
+    void loadFolders();
+  }, [loadFolders]);
 
   useEffect(() => {
-    void loadIntegrationStatus();
-  }, [loadIntegrationStatus]);
+    void loadArticles(true, true);
+  }, [loadArticles]);
+
+  useEffect(() => {
+    if (appView !== "library" || !articleListNeedsRefreshRef.current) {
+      return;
+    }
+
+    articleListNeedsRefreshRef.current = false;
+    void loadArticles(false);
+  }, [appView, articleListRefreshVersion, loadArticles]);
+
+  useEffect(() => {
+    if (appView === "settings") {
+      void loadIntegrationStatus();
+    }
+  }, [appView, loadIntegrationStatus]);
+
+  useEffect(() => {
+    const sentinel = articleListSentinelRef.current;
+
+    if (appView !== "library" || !sentinel || !nextArticleCursor) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          void loadMoreArticles();
+        }
+      },
+      { rootMargin: "600px 0px" },
+    );
+    observer.observe(sentinel);
+
+    return () => observer.disconnect();
+  }, [appView, loadMoreArticles, nextArticleCursor]);
 
   useEffect(() => {
     if (appView !== "reader") {
@@ -697,6 +830,8 @@ export function ReaderApp() {
       setArticles((current) =>
         current.map((item) => (item.id === id ? (data.summary ?? item) : item)),
       );
+      articleListNeedsRefreshRef.current = true;
+      setArticleListRefreshVersion((current) => current + 1);
     }
   }, []);
 
@@ -1033,45 +1168,87 @@ export function ReaderApp() {
     );
   }, []);
 
-  const updateOrganization = useCallback(
-    async (articleId: string, organization: OrganizationPatch) => {
-      const data = await requestJson<ArticleOrganizationResponse>(
-        `/api/articles/${articleId}`,
-        {
-          method: "PATCH",
-          headers: {
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({ organization }),
-        },
-      );
+  const applyOrganizationState = useCallback(
+    (
+      articleId: string,
+      updatedOrganization: ArticleOrganizationResponse["organization"],
+      fallbackArticle?: ArticleSummary | Article | null,
+    ) => {
+      setArticles((current) => {
+        const hasArticle = current.some((item) => item.id === articleId);
 
-      const updatedOrganization = data.organization;
-      setArticles((current) =>
-        current.map((item) =>
+        if (!hasArticle && fallbackArticle) {
+          return [
+            articleWithOrganizationState(fallbackArticle, updatedOrganization),
+            ...current,
+          ];
+        }
+
+        return current.map((item) =>
           item.id === articleId
-            ? {
-                ...item,
-                folderId: updatedOrganization.folderId ?? undefined,
-                archivedAt: updatedOrganization.archivedAt ?? undefined,
-                updatedAt: updatedOrganization.updatedAt,
-              }
+            ? articleWithOrganizationState(item, updatedOrganization)
             : item,
-        ),
-      );
+        );
+      });
       setArticle((current) =>
         current?.id === articleId
-          ? {
-              ...current,
-              folderId: updatedOrganization.folderId ?? undefined,
-              archivedAt: updatedOrganization.archivedAt ?? undefined,
-              updatedAt: updatedOrganization.updatedAt,
-            }
+          ? articleWithOrganizationState(current, updatedOrganization)
           : current,
       );
-      return updatedOrganization;
     },
     [],
+  );
+
+  const updateOrganization = useCallback(
+    async (
+      articleId: string,
+      organization: OrganizationPatch,
+      optimisticArticle?: ArticleSummary | Article | null,
+    ) => {
+      const previousOrganization = optimisticArticle
+        ? organizationStateFromArticle(optimisticArticle)
+        : null;
+
+      if (optimisticArticle) {
+        applyOrganizationState(
+          articleId,
+          organizationStateWithPatch(optimisticArticle, organization),
+          optimisticArticle,
+        );
+      }
+
+      try {
+        const data = await requestJson<ArticleOrganizationResponse>(
+          `/api/articles/${articleId}`,
+          {
+            method: "PATCH",
+            headers: {
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ organization }),
+          },
+        );
+
+        applyOrganizationState(
+          articleId,
+          data.organization,
+          optimisticArticle,
+        );
+        void loadArticles(false);
+        return data.organization;
+      } catch (updateError) {
+        if (previousOrganization) {
+          applyOrganizationState(
+            articleId,
+            previousOrganization,
+            optimisticArticle,
+          );
+        }
+
+        throw updateError;
+      }
+    },
+    [applyOrganizationState, loadArticles],
   );
 
   const focusAfterLibraryRemoval = useCallback(
@@ -1128,7 +1305,7 @@ export function ReaderApp() {
     setArticleActionError(null);
 
     try {
-      await updateOrganization(actionArticle.id, organization);
+      await updateOrganization(actionArticle.id, organization, actionArticle);
       setOrganizationNotice({
         message: wasArchived
           ? `Restored “${actionArticle.title}”.`
@@ -1136,6 +1313,10 @@ export function ReaderApp() {
         undo: {
           articleId: actionArticle.id,
           patch: undoPatch,
+          article: articleWithOrganizationState(
+            actionArticle,
+            organizationStateWithPatch(actionArticle, organization),
+          ),
         },
       });
       closeArticleActions(false);
@@ -1178,10 +1359,19 @@ export function ReaderApp() {
       setArticleActionError(null);
 
       try {
+        const currentLocationFolderId = folderIdForLocation(
+          libraryLocation,
+          defaultFolder?.id,
+        );
+        const movedOutOfCurrentView =
+          (libraryLocation === "archive" && movingRestores) ||
+          Boolean(
+            currentLocationFolderId && currentLocationFolderId !== folderId,
+          );
         await updateOrganization(actionArticle.id, {
           folderId,
           ...(movingRestores ? { archived: false } : {}),
-        });
+        }, actionArticle);
         const destination =
           destinationName ?? folderById.get(folderId)?.name ?? "folder";
         setOrganizationNotice({
@@ -1192,12 +1382,15 @@ export function ReaderApp() {
               folderId: previousFolderId,
               ...(movingRestores ? { archived: true } : {}),
             },
+            article: articleWithOrganizationState(
+              actionArticle,
+              organizationStateWithPatch(actionArticle, {
+                folderId,
+                ...(movingRestores ? { archived: false } : {}),
+              }),
+            ),
           },
         });
-        const movedOutOfCurrentView =
-          (libraryLocation === "archive" && movingRestores) ||
-          (libraryLocation.startsWith("folder:") &&
-            libraryLocation !== `folder:${folderId}`);
         closeArticleActions(!movedOutOfCurrentView);
 
         if (movedOutOfCurrentView) {
@@ -1261,13 +1454,16 @@ export function ReaderApp() {
     setOrganizationNotice({ message: "Undoing…" });
 
     try {
-      await updateOrganization(undo.articleId, undo.patch);
+      const optimisticArticle =
+        articles.find((item) => item.id === undo.articleId) ??
+        (article?.id === undo.articleId ? article : undo.article);
+      await updateOrganization(undo.articleId, undo.patch, optimisticArticle);
       setOrganizationNotice({ message: "Change undone." });
     } catch (undoError) {
       setOrganizationNotice(null);
       setError(messageFromError(undoError));
     }
-  }, [organizationNotice?.undo, updateOrganization]);
+  }, [article, articles, organizationNotice?.undo, updateOrganization]);
 
   useEffect(() => {
     if (appView === "library" || discussionOpen) {
@@ -1510,6 +1706,8 @@ export function ReaderApp() {
       }
       setUrl("");
       setStatus(null);
+      articleListNeedsRefreshRef.current = true;
+      void loadArticles(false);
     } catch (submitError) {
       resolvedHistoryIdsRef.current.set(pendingImport.id, null);
       persistHistoryMetadata(
@@ -1589,6 +1787,8 @@ export function ReaderApp() {
         setArticle(data.article);
       }
       setStatus(null);
+      articleListNeedsRefreshRef.current = true;
+      void loadArticles(false);
     } catch (uploadError) {
       resolvedHistoryIdsRef.current.set(pendingImport.id, null);
       persistHistoryMetadata(
@@ -1745,6 +1945,7 @@ export function ReaderApp() {
     setArticles((current) =>
       current.filter((item) => item.id !== deletingId),
     );
+    void loadArticles(false);
 
     if (articleIdRef.current === deletingId) {
       articleIdRef.current = null;
@@ -1805,7 +2006,7 @@ export function ReaderApp() {
                 <h1>AI Reader</h1>
                 <p>
                   {libraryCountLabel(
-                    activeArticleCount,
+                    activeArticleTotal,
                     pendingImports.length,
                   )}
                 </p>
@@ -1859,7 +2060,7 @@ export function ReaderApp() {
               </div>
               <span>
                 {libraryCountLabel(
-                  visibleArticles.length,
+                  articleTotal,
                   showPendingImports ? pendingImports.length : 0,
                 )}
               </span>
@@ -1871,17 +2072,26 @@ export function ReaderApp() {
                 <span className="visually-hidden">Show collection</span>
                 <select
                   value={libraryLocation}
-                  onChange={(event) =>
-                    setLibraryLocation(event.target.value as LibraryLocation)
-                  }
+                  onChange={(event) => {
+                    setStatus("Loading library...");
+                    setArticles([]);
+                    setArticleTotal(0);
+                    setNextArticleCursor(null);
+                    setLibraryLocation(
+                      event.target.value as ArticleListLocation,
+                    );
+                  }}
                 >
+                  <option value="default">Default</option>
                   <option value="all">All articles</option>
                   {folders
-                    .filter((folder) => !folder.isArchive)
+                    .filter(
+                      (folder) => !folder.isArchive && !isDefaultFolder(folder),
+                    )
                     .map((folder) => (
-                    <option key={folder.id} value={`folder:${folder.id}`}>
-                      {folder.name}
-                    </option>
+                      <option key={folder.id} value={`folder:${folder.id}`}>
+                        {folder.name}
+                      </option>
                     ))}
                   <option value="archive">Archive</option>
                 </select>
@@ -1891,9 +2101,15 @@ export function ReaderApp() {
                 <span className="visually-hidden">Sort articles</span>
                 <select
                   value={librarySort}
-                  onChange={(event) =>
-                    setLibrarySort(event.target.value as LibrarySortMode)
-                  }
+                  onChange={(event) => {
+                    setStatus("Loading library...");
+                    setArticles([]);
+                    setArticleTotal(0);
+                    setNextArticleCursor(null);
+                    setLibrarySort(
+                      event.target.value as ArticleListSortMode,
+                    );
+                  }}
                 >
                   <option value="saved-desc">Newest saved</option>
                   <option value="saved-asc">Oldest saved</option>
@@ -1930,10 +2146,12 @@ export function ReaderApp() {
               aria-labelledby="library-index-title"
             >
               {libraryItems.length === 0 ? (
-                <div className="empty-library">
-                  <FileText size={24} />
-                  <span>{emptyLibraryMessage(libraryLocation)}</span>
-                </div>
+                status ? null : (
+                  <div className="empty-library">
+                    <FileText size={24} />
+                    <span>{emptyLibraryMessage(libraryLocation)}</span>
+                  </div>
+                )
               ) : (
                 libraryItems.map((item) =>
                   item.kind === "pending" ? (
@@ -1959,6 +2177,41 @@ export function ReaderApp() {
                   ),
                 )
               )}
+              {articleTotal > articleListPageSize ||
+              nextArticleCursor ||
+              isLoadingMoreArticles ||
+              articleListRefreshFailed ? (
+                <div
+                  ref={articleListSentinelRef}
+                  className="article-list-loader"
+                  role="status"
+                  aria-live="polite"
+                  aria-busy={isLoadingMoreArticles}
+                >
+                  <button
+                    type="button"
+                    disabled={
+                      isLoadingMoreArticles ||
+                      (!nextArticleCursor && !articleListRefreshFailed)
+                    }
+                    onClick={() => {
+                      if (articleListRefreshFailed) {
+                        void loadArticles(false);
+                      } else {
+                        void loadMoreArticles();
+                      }
+                    }}
+                  >
+                    {isLoadingMoreArticles
+                      ? "Loading more…"
+                      : articleListRefreshFailed
+                        ? "Retry loading"
+                      : nextArticleCursor
+                        ? "Load more"
+                        : "All articles loaded"}
+                  </button>
+                </div>
+              ) : null}
             </section>
           </div>
         </section>
@@ -3419,68 +3672,96 @@ function libraryCountLabel(articleCount: number, pendingCount: number) {
   return `${articleLabel} / ${pendingLabel}`;
 }
 
-function filterAndSortArticles(
-  articles: ArticleSummary[],
-  location: LibraryLocation,
-  sort: LibrarySortMode,
+function articleListUrl(
+  location: ArticleListLocation,
+  sort: ArticleListSortMode,
+  cursor?: string,
+  limit = articleListPageSize,
 ) {
-  const folderId = location.startsWith("folder:")
+  const params = new URLSearchParams({
+    location,
+    sort,
+    limit: String(limit),
+  });
+
+  if (cursor) {
+    params.set("cursor", cursor);
+  }
+
+  return `/api/articles?${params.toString()}`;
+}
+
+function mergeArticlePages(
+  current: ArticleSummary[],
+  incoming: ArticleSummary[],
+) {
+  const seen = new Set(current.map((article) => article.id));
+  return [
+    ...current,
+    ...incoming.filter((article) => {
+      if (seen.has(article.id)) {
+        return false;
+      }
+
+      seen.add(article.id);
+      return true;
+    }),
+  ];
+}
+
+function folderIdForLocation(
+  location: ArticleListLocation,
+  defaultFolderId?: string,
+) {
+  if (location === "default") {
+    return defaultFolderId ?? null;
+  }
+
+  return location.startsWith("folder:")
     ? location.slice("folder:".length)
     : null;
-  const filtered = articles.filter((article) => {
-    if (location === "archive") {
-      return Boolean(article.archivedAt);
-    }
+}
 
-    if (article.archivedAt) {
-      return false;
-    }
+function organizationStateFromArticle(
+  article: ArticleSummary | Article,
+): ArticleOrganizationResponse["organization"] {
+  return {
+    id: article.id,
+    folderId: article.folderId ?? null,
+    archivedAt: article.archivedAt ?? null,
+    updatedAt: article.updatedAt,
+  };
+}
 
-    if (folderId) {
-      return article.folderId === folderId;
-    }
+function organizationStateWithPatch(
+  article: ArticleSummary | Article,
+  organization: OrganizationPatch,
+): ArticleOrganizationResponse["organization"] {
+  const current = organizationStateFromArticle(article);
+  return {
+    ...current,
+    folderId: Object.hasOwn(organization, "folderId")
+      ? (organization.folderId ?? null)
+      : current.folderId,
+    archivedAt: Object.hasOwn(organization, "archived")
+      ? organization.archived
+        ? new Date().toISOString()
+        : null
+      : current.archivedAt,
+    updatedAt: new Date().toISOString(),
+  };
+}
 
-    return true;
-  });
-
-  return filtered.sort((left, right) => {
-    const titleOrder = left.title.localeCompare(right.title, undefined, {
-      sensitivity: "base",
-      numeric: true,
-    });
-    const savedOrder = dateValue(right.createdAt) - dateValue(left.createdAt);
-
-    switch (sort) {
-      case "saved-asc":
-        return -savedOrder || titleOrder;
-      case "read-desc":
-        return (
-          dateValue(right.progress.updatedAt) -
-            dateValue(left.progress.updatedAt) ||
-          savedOrder ||
-          titleOrder
-        );
-      case "title-asc":
-        return titleOrder || savedOrder;
-      case "duration-asc":
-        return (
-          left.estimatedMinutes - right.estimatedMinutes ||
-          titleOrder ||
-          savedOrder
-        );
-      case "duration-desc":
-        return (
-          right.estimatedMinutes - left.estimatedMinutes ||
-          titleOrder ||
-          savedOrder
-        );
-      case "saved-desc":
-        return savedOrder || titleOrder;
-      default:
-        sort satisfies never;
-        return 0;
-    }
-  });
+function articleWithOrganizationState<T extends ArticleSummary | Article>(
+  article: T,
+  organization: ArticleOrganizationResponse["organization"],
+): T {
+  return {
+    ...article,
+    folderId: organization.folderId ?? undefined,
+    archivedAt: organization.archivedAt ?? undefined,
+    updatedAt: organization.updatedAt,
+  };
 }
 
 function compareFolders(left: ArticleFolder, right: ArticleFolder) {
@@ -3498,9 +3779,13 @@ function isDefaultFolder(folder: ArticleFolder) {
   );
 }
 
-function emptyLibraryMessage(location: LibraryLocation) {
+function emptyLibraryMessage(location: ArticleListLocation) {
   if (location === "archive") {
     return "No archived articles.";
+  }
+
+  if (location === "default") {
+    return "No articles in Default.";
   }
 
   if (location.startsWith("folder:")) {

@@ -3,6 +3,11 @@ import {
   articleFromHtml,
   articleFromUrl,
 } from "@/lib/extractors";
+import type {
+  ArticleListLocation,
+  ArticleListPageResponse,
+  ArticleListSortMode,
+} from "@/lib/articleList";
 import {
   archiveArticleArtifacts,
   deleteArticleArtifacts,
@@ -19,6 +24,10 @@ import type {
 } from "@/server/ports/articleRepository";
 import { toArticleSummary } from "@/server/ports/articleRepository";
 import type { Article } from "@/lib/types";
+import {
+  decodeArticleListCursor,
+  encodeArticleListCursor,
+} from "@/server/articles/articleListCursor";
 
 type ImportedArticleOptions = {
   deduplication?: ArticleDeduplicationIndex;
@@ -27,6 +36,39 @@ type ImportedArticleOptions = {
 
 export async function listArticleSummaries(ownerEmail: string) {
   return getArticleRepository().list(ownerEmail);
+}
+
+export async function listArticleSummariesPage(
+  ownerEmail: string,
+  options: {
+    location: ArticleListLocation;
+    sort: ArticleListSortMode;
+    limit: number;
+    cursor?: string;
+  },
+): Promise<ArticleListPageResponse> {
+  const cursorQuery = {
+    location: options.location,
+    sort: options.sort,
+    limit: options.limit,
+  };
+  const offset = options.cursor
+    ? decodeArticleListCursor(options.cursor, cursorQuery)
+    : 0;
+  const page = await getArticleRepository().listPage(ownerEmail, {
+    ...cursorQuery,
+    offset,
+  });
+
+  return {
+    articles: page.articles,
+    total: page.total,
+    activeTotal: page.activeTotal,
+    nextCursor:
+      page.nextOffset === null
+        ? null
+        : encodeArticleListCursor(cursorQuery, page.nextOffset),
+  };
 }
 
 export async function listArticleFolders(ownerEmail: string) {

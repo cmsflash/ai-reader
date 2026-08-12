@@ -295,6 +295,104 @@ test("restoring a legacy archive-folder article returns it to a normal folder", 
   }
 });
 
+test("paginates locally with location totals and stable list sorting", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-reader-store-"));
+  const repository = new LocalJsonArticleRepository({
+    storePath: path.join(directory, "articles.json"),
+  });
+
+  try {
+    await repository.create(
+      {
+        ...article("default-beta"),
+        title: "Beta",
+        createdAt: "2026-08-03T00:00:00.000Z",
+      },
+      "reader@example.com",
+    );
+    await repository.create(
+      {
+        ...article("default-alpha"),
+        title: "Alpha",
+        createdAt: "2026-08-03T00:00:00.000Z",
+      },
+      "reader@example.com",
+    );
+    await repository.create(
+      {
+        ...article("research"),
+        createdAt: "2026-08-04T00:00:00.000Z",
+      },
+      "reader@example.com",
+    );
+    await repository.create(
+      {
+        ...article("archived"),
+        createdAt: "2026-08-05T00:00:00.000Z",
+      },
+      "reader@example.com",
+    );
+    const researchFolder = await repository.createFolder(
+      "Research",
+      "reader@example.com",
+    );
+    await repository.updateOrganization(
+      "research",
+      "reader@example.com",
+      { folderId: researchFolder.id },
+    );
+    await repository.updateOrganization(
+      "archived",
+      "reader@example.com",
+      { archived: true },
+    );
+
+    const firstPage = await repository.listPage("reader@example.com", {
+      location: "default",
+      sort: "saved-desc",
+      limit: 1,
+      offset: 0,
+    });
+    const secondPage = await repository.listPage("reader@example.com", {
+      location: "default",
+      sort: "saved-desc",
+      limit: 1,
+      offset: firstPage.nextOffset,
+    });
+    const researchPage = await repository.listPage("reader@example.com", {
+      location: `folder:${researchFolder.id}`,
+      sort: "saved-desc",
+      limit: 30,
+      offset: 0,
+    });
+    const archivePage = await repository.listPage("reader@example.com", {
+      location: "archive",
+      sort: "saved-desc",
+      limit: 30,
+      offset: 0,
+    });
+
+    assert.deepEqual(firstPage.articles.map(({ id }) => id), [
+      "default-alpha",
+    ]);
+    assert.equal(firstPage.total, 2);
+    assert.equal(firstPage.activeTotal, 3);
+    assert.equal(firstPage.nextOffset, 1);
+    assert.deepEqual(secondPage.articles.map(({ id }) => id), [
+      "default-beta",
+    ]);
+    assert.equal(secondPage.nextOffset, null);
+    assert.deepEqual(researchPage.articles.map(({ id }) => id), ["research"]);
+    assert.equal(researchPage.total, 1);
+    assert.equal(researchPage.activeTotal, 3);
+    assert.deepEqual(archivePage.articles.map(({ id }) => id), ["archived"]);
+    assert.equal(archivePage.total, 1);
+    assert.equal(archivePage.activeTotal, 3);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 function article(id, textContent = id) {
   const timestamp = "2026-07-27T12:00:00.000Z";
 

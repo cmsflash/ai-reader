@@ -3,6 +3,10 @@ import {
   articleThumbnailUrl,
 } from "../../lib/articlePreview.ts";
 import type {
+  ArticleListLocation,
+  ArticleListSortMode,
+} from "@/lib/articleList";
+import type {
   Article,
   ArticleFolder,
   ArticleSummary,
@@ -24,8 +28,26 @@ export type ArticleOrganizationResult = {
   updatedAt: string;
 };
 
+export type ArticleListPageQuery = {
+  location: ArticleListLocation;
+  sort: ArticleListSortMode;
+  limit: number;
+  offset: number;
+};
+
+export type ArticleListPageResult = {
+  articles: ArticleSummary[];
+  total: number;
+  activeTotal: number;
+  nextOffset: number | null;
+};
+
 export interface ArticleRepository {
   list(ownerEmail: string): Promise<ArticleSummary[]>;
+  listPage(
+    ownerEmail: string,
+    query: ArticleListPageQuery,
+  ): Promise<ArticleListPageResult>;
   listFolders(ownerEmail: string): Promise<ArticleFolder[]>;
   createFolder(name: string, ownerEmail: string): Promise<ArticleFolder>;
   listDeduplicationCandidates(

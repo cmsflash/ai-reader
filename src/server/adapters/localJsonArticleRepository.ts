@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { filterAndSortArticles } from "../../lib/articleList.ts";
 import type {
   Article,
   ArticleFolder,
@@ -8,6 +9,7 @@ import type {
   ReadingProgress,
 } from "@/lib/types";
 import {
+  type ArticleListPageQuery,
   type ArticleOrganizationPatch,
   type ArticleOrganizationResult,
   type ArticleProgressPatch,
@@ -43,6 +45,38 @@ export class LocalJsonArticleRepository implements ArticleRepository {
 
   async list(ownerEmail: string) {
     return (await this.listArticles(ownerEmail)).map(toArticleSummary);
+  }
+
+  async listPage(ownerEmail: string, query: ArticleListPageQuery) {
+    if (
+      !Number.isSafeInteger(query.limit) ||
+      query.limit < 1 ||
+      !Number.isSafeInteger(query.offset) ||
+      query.offset < 0
+    ) {
+      throw new Error("Invalid article list page.");
+    }
+
+    const defaultFolder = await this.ensureDefaultFolder(ownerEmail);
+    const store = await this.readCurrentStore();
+    const summaries = store.articles
+      .filter((article) => articleBelongsToOwner(article, ownerEmail))
+      .map(toArticleSummary);
+    const filtered = filterAndSortArticles(
+      summaries,
+      query.location,
+      query.sort,
+      defaultFolder.id,
+    );
+    const articles = filtered.slice(query.offset, query.offset + query.limit);
+    const nextOffset = query.offset + articles.length;
+
+    return {
+      articles,
+      total: filtered.length,
+      activeTotal: summaries.filter((article) => !article.archivedAt).length,
+      nextOffset: nextOffset < filtered.length ? nextOffset : null,
+    };
   }
 
   async listFolders(ownerEmail: string) {
