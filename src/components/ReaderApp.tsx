@@ -3557,7 +3557,7 @@ function ArticleImageBlock({
         <img
           src={src}
           alt={block.alt}
-          loading="lazy"
+          loading={sources.length > 1 ? "eager" : "lazy"}
           onError={() => {
             setSourceIndex((current) => Math.min(current + 1, sources.length));
           }}
