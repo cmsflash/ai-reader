@@ -4011,6 +4011,19 @@ input[type="range"] {
   color: var(--accent);
 }
 
+.article-row.pending-failed .article-row-thumbnail {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.article-row.pending-stalled .article-row-thumbnail {
+  color: var(--amber);
+}
+
+.article-row .queued-import-retry {
+  opacity: 1;
+}
+
 .article-row-action-spacer {
   width: 44px;
 }

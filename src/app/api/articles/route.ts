@@ -10,6 +10,7 @@ import {
   importUrlArticle,
   listArticleSummariesPage,
 } from "@/server/articles/articleService";
+import { listShareUrlImports } from "@/server/articles/urlImportQueue";
 import { ArticleListCursorError } from "@/server/articles/articleListCursor";
 import { requireAppUser } from "@/server/auth/access";
 
@@ -40,8 +41,11 @@ export async function GET(request: Request) {
   }
 
   try {
+    // Read imports first so a completing job cannot disappear before its
+    // finished article is visible in the same response.
+    const imports = await listShareUrlImports(auth.user.ownerEmail);
     const page = await listArticleSummariesPage(auth.user.ownerEmail, query);
-    return NextResponse.json(page);
+    return NextResponse.json({ ...page, imports });
   } catch (error) {
     if (error instanceof ArticleListCursorError) {
       return NextResponse.json({ error: error.message }, { status: 400 });

@@ -8,6 +8,7 @@ import {
   findImportRecord,
   hasActiveImportReference,
   isImportRecordClaimable,
+  listActionableImportRecords,
   markImportCompleted,
   markImportFailed,
 } from "../src/server/integrations/importRecords.ts";
@@ -196,6 +197,74 @@ test("failed finalization leaves a readable record", async () => {
   );
   assert.equal(stored?.status, "failed");
   assert.match(stored?.errorMessage ?? "", /expected test failure/);
+});
+
+test("actionable import listing returns only pending and failed selected providers", async () => {
+  const ownerEmail = `actionable-${crypto.randomUUID()}@example.com`;
+  const pending = await claimImport(
+    {
+      ownerEmail,
+      provider: "android-share",
+      externalId: "pending-share",
+      sourceUrl: "https://example.com/pending",
+    },
+    { attemptId: "pending-attempt" },
+  );
+  const completed = await claimImport(
+    {
+      ownerEmail,
+      provider: "android-share",
+      externalId: "completed-share",
+      sourceUrl: "https://example.com/completed",
+    },
+    { attemptId: "completed-attempt" },
+  );
+  const failed = await claimImport(
+    {
+      ownerEmail,
+      provider: "ios-shortcut",
+      externalId: "failed-share",
+      sourceUrl: "https://example.com/failed",
+    },
+    { attemptId: "failed-attempt" },
+  );
+  await claimImport(
+    {
+      ownerEmail,
+      provider: "unrelated-provider",
+      externalId: "unrelated-pending",
+    },
+    { attemptId: "unrelated-attempt" },
+  );
+
+  await markImportCompleted(
+    ownerEmail,
+    "android-share",
+    "completed-share",
+    "completed-article",
+    completed.attemptId,
+  );
+  await markImportFailed(
+    ownerEmail,
+    "ios-shortcut",
+    "failed-share",
+    new Error("expected failure"),
+    failed.attemptId,
+  );
+
+  const records = await listActionableImportRecords(ownerEmail, [
+    "android-share",
+    "ios-shortcut",
+  ]);
+
+  assert.ok(pending?.attemptId);
+  assert.deepEqual(
+    records.map(({ externalId, status }) => [externalId, status]).sort(),
+    [
+      ["failed-share", "failed"],
+      ["pending-share", "pending"],
+    ],
+  );
 });
 
 test("provider article IDs are stable for retries and distinct across source versions", () => {

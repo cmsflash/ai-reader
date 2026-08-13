@@ -337,6 +337,63 @@ export async function listImportRecords(ownerEmail: string, provider: string) {
   return rows.map(rowToRecord);
 }
 
+export async function listActionableImportRecords(
+  ownerEmail: string,
+  providers: readonly string[],
+) {
+  const normalizedOwner = normalizeOwnerEmail(ownerEmail);
+  const normalizedProviders = Array.from(
+    new Set(providers.map((provider) => provider.trim()).filter(Boolean)),
+  );
+
+  if (normalizedProviders.length === 0) {
+    return [];
+  }
+
+  if (!hasProductionDatabase()) {
+    const providerSet = new Set(normalizedProviders);
+    return Array.from(localRecords.values())
+      .filter(
+        (record) =>
+          record.ownerEmail === normalizedOwner &&
+          providerSet.has(record.provider) &&
+          (record.status === "pending" || record.status === "failed"),
+      )
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .slice(0, 100);
+  }
+
+  const rows = (await getDatabaseSql().query(
+    `
+      SELECT
+        owner_email,
+        provider,
+        external_id,
+        source_hash,
+        article_id,
+        cleanup_article_id,
+        attempt_id,
+        status,
+        source_title,
+        source_url,
+        error_message,
+        metadata,
+        created_at,
+        updated_at
+      FROM external_imports
+      WHERE
+        owner_email = $1
+        AND provider = ANY($2::text[])
+        AND status IN ('pending', 'failed')
+      ORDER BY updated_at DESC
+      LIMIT 100
+    `,
+    [normalizedOwner, normalizedProviders],
+  )) as ImportRecordRow[];
+
+  return rows.map(rowToRecord);
+}
+
 export async function hasActiveImportReference(
   ownerEmail: string,
   articleId: string,

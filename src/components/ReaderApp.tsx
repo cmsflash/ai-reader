@@ -21,6 +21,7 @@ import {
   RefreshCw,
   Settings2,
   Share2,
+  TriangleAlert,
   Trash2,
   Upload,
   Volume2,
@@ -60,6 +61,7 @@ import {
 import {
   ARTICLE_LIST_MAX_PAGE_SIZE,
   articleMatchesLocation,
+  type ArticleImportSummary,
   type ArticleListLocation,
   type ArticleListPageResponse,
   type ArticleListSortMode,
@@ -103,6 +105,9 @@ type PendingImport = {
   title: string;
   detail: string;
   sourceType: SourceType;
+  status?: "pending" | "failed" | "stalled";
+  errorMessage?: string;
+  retryUrl?: string;
 };
 
 type AuthStatusResponse = {
@@ -283,6 +288,9 @@ export function ReaderApp() {
   const [articleListRefreshVersion, setArticleListRefreshVersion] =
     useState(0);
   const [pendingImports, setPendingImports] = useState<PendingImport[]>([]);
+  const [queuedImports, setQueuedImports] = useState<ArticleImportSummary[]>(
+    [],
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [article, setArticle] = useState<Article | null>(null);
   const [url, setUrl] = useState("");
@@ -411,6 +419,20 @@ export function ReaderApp() {
   );
   const showPendingImports =
     libraryLocation === "all" || libraryLocation === "default";
+  const queuedImportRows = useMemo(
+    () => queuedImports.map(pendingImportFromQueue),
+    [queuedImports],
+  );
+  const hasRunningQueuedImports = queuedImports.some(
+    (queuedImport) =>
+      queuedImport.status === "pending" && !queuedImport.retryable,
+  );
+  const queuedImportProblemCount = queuedImports.filter(
+    (queuedImport) =>
+      queuedImport.status === "failed" || queuedImport.retryable,
+  ).length;
+  const importingCount =
+    pendingImports.length + queuedImports.length - queuedImportProblemCount;
   const libraryItems = useMemo(
     () => [
       ...(showPendingImports
@@ -419,12 +441,23 @@ export function ReaderApp() {
             pendingImport,
           }))
         : []),
+      ...(showPendingImports
+        ? queuedImportRows.map((pendingImport) => ({
+            kind: "queued" as const,
+            pendingImport,
+          }))
+        : []),
       ...visibleArticles.map((articleSummary) => ({
         kind: "article" as const,
         articleSummary,
       })),
     ],
-    [pendingImports, showPendingImports, visibleArticles],
+    [
+      pendingImports,
+      queuedImportRows,
+      showPendingImports,
+      visibleArticles,
+    ],
   );
   const actionArticle = articleActions
     ? (articles.find((item) => item.id === articleActions.articleId) ?? null)
@@ -591,6 +624,7 @@ export function ReaderApp() {
       if (clearExisting) {
         setArticles([]);
         setArticleTotal(0);
+        setQueuedImports([]);
       }
 
       try {
@@ -603,6 +637,7 @@ export function ReaderApp() {
         }
 
         setArticles(data.articles);
+        setQueuedImports(data.imports ?? []);
         setArticleTotal(data.total);
         setActiveArticleTotal(data.activeTotal);
         setNextArticleCursor(data.nextCursor);
@@ -649,6 +684,7 @@ export function ReaderApp() {
       }
 
       setArticles((current) => mergeArticlePages(current, data.articles));
+      setQueuedImports(data.imports ?? []);
       setArticleTotal(data.total);
       setActiveArticleTotal(data.activeTotal);
       setNextArticleCursor(data.nextCursor);
@@ -725,6 +761,61 @@ export function ReaderApp() {
   useEffect(() => {
     void loadArticles(true, true);
   }, [loadArticles]);
+
+  useEffect(() => {
+    if (
+      appView !== "library" ||
+      !showPendingImports ||
+      !hasRunningQueuedImports
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    let refreshing = false;
+    let pollTimer = 0;
+
+    const refreshQueuedImports = async () => {
+      if (refreshing || document.visibilityState !== "visible") {
+        return;
+      }
+
+      refreshing = true;
+      try {
+        await loadArticles(false);
+      } finally {
+        refreshing = false;
+      }
+    };
+    const poll = async () => {
+      await refreshQueuedImports();
+
+      if (!cancelled) {
+        pollTimer = window.setTimeout(poll, 3_000);
+      }
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshQueuedImports();
+      }
+    };
+
+    pollTimer = window.setTimeout(poll, 3_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(pollTimer);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [
+    appView,
+    hasRunningQueuedImports,
+    loadArticles,
+    showPendingImports,
+  ]);
 
   useEffect(() => {
     if (appView !== "library" || !articleListNeedsRefreshRef.current) {
@@ -2092,7 +2183,8 @@ export function ReaderApp() {
                 <p>
                   {libraryCountLabel(
                     activeArticleTotal,
-                    pendingImports.length,
+                    importingCount,
+                    queuedImportProblemCount,
                   )}
                 </p>
               </div>
@@ -2146,7 +2238,8 @@ export function ReaderApp() {
               <span>
                 {libraryCountLabel(
                   articleTotal,
-                  showPendingImports ? pendingImports.length : 0,
+                  showPendingImports ? importingCount : 0,
+                  showPendingImports ? queuedImportProblemCount : 0,
                 )}
               </span>
             </header>
@@ -2239,12 +2332,19 @@ export function ReaderApp() {
                 )
               ) : (
                 libraryItems.map((item) =>
-                  item.kind === "pending" ? (
+                  item.kind !== "article" ? (
                     <PendingImportRow
-                      key={item.pendingImport.id}
+                      key={`${item.kind}:${item.pendingImport.id}`}
                       pendingImport={item.pendingImport}
-                      selected={item.pendingImport.id === selectedId}
-                      onOpen={() => showReader(item.pendingImport.id)}
+                      selected={
+                        item.kind === "pending" &&
+                        item.pendingImport.id === selectedId
+                      }
+                      onOpen={
+                        item.kind === "pending"
+                          ? () => showReader(item.pendingImport.id)
+                          : undefined
+                      }
                     />
                   ) : (
                     <ArticleRow
@@ -3056,39 +3156,80 @@ function PendingImportRow({
 }: {
   pendingImport: PendingImport;
   selected: boolean;
-  onOpen: () => void;
+  onOpen?: () => void;
 }) {
-  return (
-    <article
-      className={`article-row pending ${selected ? "selected" : ""}`}
-      data-article-id={pendingImport.id}
-      aria-busy="true"
-    >
-      <button
-        className="article-row-open"
-        type="button"
-        data-article-open-id={pendingImport.id}
-        aria-current={selected ? "page" : undefined}
-        onClick={onOpen}
+  const importStatus = pendingImport.status ?? "pending";
+  const isWorking = importStatus === "pending";
+  const statusLabel =
+    importStatus === "failed"
+      ? "Import failed"
+      : importStatus === "stalled"
+        ? "Import paused"
+        : "Importing";
+  const content = (
+    <>
+      <span
+        className={`article-row-thumbnail thumbnail-${pendingImport.sourceType}`}
+        aria-hidden="true"
       >
-        <span
-          className={`article-row-thumbnail thumbnail-${pendingImport.sourceType}`}
-          aria-hidden="true"
-        >
+        {isWorking ? (
           <RefreshCw className="spin" size={22} />
+        ) : (
+          <TriangleAlert size={22} />
+        )}
+      </span>
+      <span className="article-row-main">
+        <span className="article-row-title">{pendingImport.title}</span>
+        <span className="article-row-meta">
+          {sourceLabel(pendingImport.sourceType)} · {statusLabel} ·{" "}
+          {pendingImport.detail}
         </span>
-        <span className="article-row-main">
-          <span className="article-row-title">{pendingImport.title}</span>
-          <span className="article-row-meta">
-            {sourceLabel(pendingImport.sourceType)} · Parsing ·{" "}
-            {pendingImport.detail}
+        {!isWorking && pendingImport.errorMessage ? (
+          <span className="article-row-excerpt">
+            {pendingImport.errorMessage}
           </span>
+        ) : null}
+        {isWorking ? (
           <span className="mini-progress indeterminate" aria-hidden="true">
             <span />
           </span>
-        </span>
-      </button>
-      <span className="article-row-action-spacer" aria-hidden="true" />
+        ) : null}
+      </span>
+    </>
+  );
+
+  return (
+    <article
+      className={`article-row pending pending-${importStatus} ${selected ? "selected" : ""}`}
+      data-article-id={pendingImport.id}
+      aria-busy={isWorking ? "true" : undefined}
+    >
+      {onOpen ? (
+        <button
+          className="article-row-open"
+          type="button"
+          data-article-open-id={pendingImport.id}
+          aria-current={selected ? "page" : undefined}
+          onClick={onOpen}
+        >
+          {content}
+        </button>
+      ) : (
+        <div className="article-row-open">{content}</div>
+      )}
+      {pendingImport.retryUrl ? (
+        <button
+          className="article-row-more queued-import-retry"
+          type="button"
+          aria-label={`Retry importing ${pendingImport.title}`}
+          title="Retry import"
+          onClick={() => window.location.assign(pendingImport.retryUrl ?? "/")}
+        >
+          <RefreshCw size={19} />
+        </button>
+      ) : (
+        <span className="article-row-action-spacer" aria-hidden="true" />
+      )}
     </article>
   );
 }
@@ -3765,6 +3906,38 @@ function messageFromError(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
 }
 
+function pendingImportFromQueue(
+  queuedImport: ArticleImportSummary,
+): PendingImport {
+  const stalled =
+    queuedImport.status === "pending" && queuedImport.retryable;
+
+  return {
+    id: queuedImport.id,
+    title: queuedImport.title,
+    detail: sourceDomain(queuedImport.sourceUrl),
+    sourceType: "url",
+    status: stalled ? "stalled" : queuedImport.status,
+    errorMessage:
+      queuedImport.errorMessage ??
+      (stalled
+        ? "The background import stopped before it finished. Retry to continue."
+        : undefined),
+    retryUrl: queuedImport.retryable
+      ? queuedImportRetryUrl(queuedImport)
+      : undefined,
+  };
+}
+
+function queuedImportRetryUrl(queuedImport: ArticleImportSummary) {
+  const params = new URLSearchParams({
+    source: queuedImport.source,
+    title: queuedImport.title,
+    url: queuedImport.sourceUrl,
+  });
+  return `/share?${params.toString()}`;
+}
+
 function pendingImportFromUrl(rawUrl: string): PendingImport {
   return {
     id: pendingImportId(),
@@ -3817,17 +3990,33 @@ function sourceTypeFromFileName(fileName: string): SourceType {
   return "text";
 }
 
-function libraryCountLabel(articleCount: number, pendingCount: number) {
+function libraryCountLabel(
+  articleCount: number,
+  pendingCount: number,
+  problemCount = 0,
+) {
   const articleLabel =
     articleCount === 1 ? "1 article" : `${articleCount} articles`;
 
-  if (pendingCount === 0) {
+  if (pendingCount === 0 && problemCount === 0) {
     return articleLabel;
   }
 
-  const pendingLabel =
-    pendingCount === 1 ? "1 parsing" : `${pendingCount} parsing`;
-  return `${articleLabel} / ${pendingLabel}`;
+  const importLabels = [];
+
+  if (pendingCount > 0) {
+    importLabels.push(
+      pendingCount === 1 ? "1 importing" : `${pendingCount} importing`,
+    );
+  }
+
+  if (problemCount > 0) {
+    importLabels.push(
+      problemCount === 1 ? "1 needs attention" : `${problemCount} need attention`,
+    );
+  }
+
+  return `${articleLabel} / ${importLabels.join(" / ")}`;
 }
 
 function articleListUrl(

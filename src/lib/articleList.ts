@@ -1,5 +1,17 @@
 import type { ArticleSummary } from "@/lib/types";
 
+export type ArticleImportSummary = {
+  id: string;
+  source: "android-share" | "ios-shortcut" | "web-share";
+  status: "pending" | "failed";
+  title: string;
+  sourceUrl: string;
+  errorMessage?: string;
+  retryable: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ArticleListLocation =
   | "default"
   | "all"
@@ -19,6 +31,7 @@ export type ArticleListPageResponse = {
   total: number;
   activeTotal: number;
   nextCursor: string | null;
+  imports?: ArticleImportSummary[];
 };
 
 export const ARTICLE_LIST_DEFAULT_PAGE_SIZE = 30;
