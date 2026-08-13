@@ -1,6 +1,8 @@
 import { after } from "next/server";
 import { redirect } from "next/navigation";
+import { ShareHandoff } from "@/components/ShareHandoff";
 import { ShareImport } from "@/components/ShareImport";
+import { shouldAutoReturnFromShare } from "@/lib/shareHandoff";
 import { requireAppUser } from "@/server/auth/access";
 import {
   claimUrlImport,
@@ -15,6 +17,7 @@ export const maxDuration = 60;
 type SharePageProps = {
   searchParams: Promise<{
     error?: string;
+    returnToSource?: string;
     source?: string;
     text?: string;
     title?: string;
@@ -78,6 +81,10 @@ export default async function SharePage({ searchParams }: SharePageProps) {
 
   if (run) {
     after(run);
+  }
+
+  if (shouldAutoReturnFromShare(source, params.returnToSource)) {
+    return <ShareHandoff />;
   }
 
   redirect("/");

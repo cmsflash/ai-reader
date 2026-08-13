@@ -21,6 +21,7 @@ export async function POST(request: Request) {
 
     destination.searchParams.set("url", articleUrl);
     destination.searchParams.set("source", "android-share");
+    destination.searchParams.set("returnToSource", "1");
 
     if (rawTitle && rawTitle !== articleUrl) {
       destination.searchParams.set("title", rawTitle.slice(0, 240));

@@ -59,8 +59,9 @@ On Android, sign in to the deployed reader in Chrome and install it as a PWA. Th
 then appears as **AI Reader** in Android's share target picker. This relies on the standard
 [Web Share Target API](https://developer.chrome.com/docs/capabilities/web-apis/web-share-target).
 Chrome must launch or focus a PWA share target, so a web app cannot receive the share invisibly in
-the source app. AI Reader keeps that handoff short: it queues extraction on the server, returns to
-the library immediately, and shows a pending or failed import row until the article is ready.
+the source app. AI Reader keeps that handoff short: once the server has queued extraction, it asks
+Chrome to close the share-launched window and return to the source app. If Chrome refuses, AI Reader
+falls back to the library and shows a pending or failed import row until the article is ready.
 
 On iPhone or iPad, create a Share Sheet Shortcut that accepts URLs or Safari web pages,
 percent-encodes the input, and opens:
