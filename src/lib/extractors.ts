@@ -338,6 +338,7 @@ async function extractReadableHtml(
   const document = dom.window.document;
   const source = new URL(sourceUrl);
   const title = extractHtmlTitle(document, source, fallbackTitle);
+  const platformLeadBlocks = extractPlatformLeadBlocks(document, source);
   removeNonReadableNodes(document, source);
   const pageText = normalizeText(document.body?.textContent ?? "");
 
@@ -378,13 +379,150 @@ async function extractReadableHtml(
     );
   }
 
+  const blocks = prependUniqueImageBlocks(
+    candidate.blocks,
+    platformLeadBlocks,
+  );
+
   return {
     title: candidate.title,
     sourceType: "url",
     sourceUrl,
-    contentHtml: candidate.contentHtml,
-    blocks: candidate.blocks,
+    contentHtml:
+      blocks === candidate.blocks ? candidate.contentHtml : blocksToHtml(blocks),
+    blocks,
   };
+}
+
+function extractPlatformLeadBlocks(
+  document: Document,
+  source: URL,
+): ArticleBlock[] {
+  if (!isWeChatHost(source.hostname)) {
+    return [];
+  }
+
+  const coverElement = [
+    "#js_row_immersive_cover_img img",
+    "#js_cover img",
+    "img#js_cover",
+    ".rich_media_thumb",
+  ]
+    .map((selector) => document.querySelector(selector))
+    .find((element): element is Element => element !== null);
+  const coverFromElement = imageBlockFromElement(coverElement ?? null, 0);
+  const coverSource =
+    coverFromElement?.src ??
+    metaImageSource(document, source, [
+      'meta[property="og:image"]',
+      'meta[name="twitter:image"]',
+    ]);
+
+  if (!coverSource) {
+    return [];
+  }
+
+  return [
+    {
+      id: blockId("image", 0),
+      type: "image",
+      // The article title immediately follows this decorative hero image.
+      // Keeping the alt empty also prevents text-to-speech from announcing
+      // WeChat's generic `cover_image` label as article content.
+      alt: "",
+      src: coverSource,
+    },
+  ];
+}
+
+function metaImageSource(
+  document: Document,
+  source: URL,
+  selectors: string[],
+) {
+  for (const selector of selectors) {
+    const rawSource = document
+      .querySelector<HTMLMetaElement>(selector)
+      ?.content.trim();
+
+    if (!rawSource) {
+      continue;
+    }
+
+    try {
+      const resolved = new URL(rawSource, source);
+
+      if (["http:", "https:"].includes(resolved.protocol)) {
+        return resolved.href;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return undefined;
+}
+
+function prependUniqueImageBlocks(
+  blocks: ArticleBlock[],
+  leadBlocks: ArticleBlock[],
+) {
+  if (leadBlocks.length === 0) {
+    return blocks;
+  }
+
+  const existingImages = new Set(
+    blocks
+      .filter(
+        (block): block is Extract<ArticleBlock, { type: "image" }> =>
+          block.type === "image",
+      )
+      .map((block) => imageIdentity(block.originalSrc ?? block.src))
+      .filter((identity): identity is string => Boolean(identity)),
+  );
+  const uniqueLeadBlocks = leadBlocks.filter((block) => {
+    if (block.type !== "image") {
+      return true;
+    }
+
+    const identity = imageIdentity(block.originalSrc ?? block.src);
+
+    if (!identity || existingImages.has(identity)) {
+      return false;
+    }
+
+    existingImages.add(identity);
+    return true;
+  });
+
+  if (uniqueLeadBlocks.length === 0) {
+    return blocks;
+  }
+
+  return [...uniqueLeadBlocks, ...blocks].map((block, index) => ({
+    ...block,
+    id: blockId(block.type, index),
+  }));
+}
+
+function imageIdentity(rawSource?: string) {
+  if (!rawSource) {
+    return undefined;
+  }
+
+  try {
+    const source = new URL(rawSource);
+    const host = source.hostname.toLowerCase();
+
+    if (host === "mmbiz.qpic.cn" || host.endsWith(".mmbiz.qpic.cn")) {
+      return `${host}${source.pathname}`;
+    }
+
+    source.hash = "";
+    return source.href;
+  } catch {
+    return undefined;
+  }
 }
 
 function readabilityCandidate(
@@ -1774,7 +1912,7 @@ function imageBlockFromElement(
   element: Element | null,
   index: number,
   caption = "",
-): ArticleBlock | null {
+): Extract<ArticleBlock, { type: "image" }> | null {
   if (!element) {
     return null;
   }

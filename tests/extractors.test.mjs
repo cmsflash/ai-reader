@@ -402,6 +402,99 @@ test("preserves hidden WeChat content and resolves nested lazy images", async ()
   assert.doesNotMatch(article.textContent, /Hidden sharing controls/);
 });
 
+test("preserves a WeChat cover outside the readable article body", async () => {
+  const article = await articleFromHtml(
+    `
+      <html>
+        <head>
+          <title>WeChat cover article</title>
+          <meta
+            property="og:image"
+            content="https://mmbiz.qpic.cn/mmbiz_jpg/cover-image/640?wx_fmt=jpeg"
+          >
+        </head>
+        <body>
+          <div id="js_row_immersive_cover_img">
+            <img
+              src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+              data-src="https://mmbiz.qpic.cn/mmbiz_jpg/cover-image/640?wx_fmt=jpeg"
+            >
+          </div>
+          <div id="js_content" class="rich_media_content">
+            ${articleParagraphs.map((paragraph) => `<p>${paragraph}</p>`).join("")}
+          </div>
+        </body>
+      </html>
+    `,
+    { sourceUrl: "https://mp.weixin.qq.com/s/cover-example" },
+  );
+  const images = article.blocks.filter((block) => block.type === "image");
+
+  assert.equal(images.length, 1);
+  assert.equal(
+    images[0].src,
+    "https://mmbiz.qpic.cn/mmbiz_jpg/cover-image/640?wx_fmt=jpeg",
+  );
+  assert.equal(images[0].alt, "");
+  assert.equal(article.blocks[0], images[0]);
+  assert.match(article.contentHtml, /<figure><img/);
+});
+
+test("uses WeChat Open Graph covers and deduplicates matching inline images", async () => {
+  const article = await articleFromHtml(
+    `
+      <html>
+        <head>
+          <title>WeChat duplicate cover article</title>
+          <meta
+            property="og:image"
+            content="https://mmbiz.qpic.cn/mmbiz_png/shared-image/640?wx_fmt=png&amp;from=cover"
+          >
+        </head>
+        <body>
+          <div id="js_content" class="rich_media_content">
+            <p>Opening analysis introduces the illustration that follows.</p>
+            <img
+              data-src="https://mmbiz.qpic.cn/mmbiz_png/shared-image/640?wx_fmt=png&amp;from=article"
+              alt="Shared illustration"
+            >
+            ${articleParagraphs.map((paragraph) => `<p>${paragraph}</p>`).join("")}
+          </div>
+        </body>
+      </html>
+    `,
+    { sourceUrl: "https://mp.weixin.qq.com/s/deduplicated-cover" },
+  );
+  const images = article.blocks.filter((block) => block.type === "image");
+
+  assert.equal(images.length, 1);
+  assert.equal(images[0].alt, "Shared illustration");
+  assert.match(images[0].src, /from=article/);
+});
+
+test("does not promote WeChat avatar or QR chrome into article media", async () => {
+  const article = await articleFromHtml(
+    `
+      <html>
+        <head><title>WeChat article without a cover</title></head>
+        <body>
+          <img class="account-avatar" src="https://mmbiz.qpic.cn/avatar/132" alt="Account avatar">
+          <div id="js_content" class="rich_media_content">
+            ${articleParagraphs.map((paragraph) => `<p>${paragraph}</p>`).join("")}
+          </div>
+          <img class="qr-code" src="https://mmbiz.qpic.cn/qr/640" alt="QR code">
+        </body>
+      </html>
+    `,
+    { sourceUrl: "https://mp.weixin.qq.com/s/no-cover" },
+  );
+
+  assert.equal(
+    article.blocks.filter((block) => block.type === "image").length,
+    0,
+  );
+});
+
 test("decodes standalone HTML files using their declared charset", async () => {
   const body = articleParagraphs.join(" ");
   const html = Buffer.concat([
