@@ -5,6 +5,7 @@ import {
   PilotNarrationError,
   verifyPilotNarrationModelAccess,
 } from "@/server/articles/articleNarrationPilot";
+import { alignPilotArticleNarration } from "@/server/articles/articleNarrationAlignment";
 import { getArticleRepository } from "@/server/runtime/articleRepository";
 import { getArtifactStorage } from "@/server/runtime/artifactStorage";
 
@@ -67,6 +68,37 @@ export async function POST(_request: Request, context: RouteContext) {
         narration: result.narration,
         alreadyExisted: result.alreadyExisted,
         qa: result.qa,
+        estimatedCostUsd: result.estimatedCostUsd,
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
+  } catch (error) {
+    return narrationErrorResponse(error);
+  }
+}
+
+export async function PATCH(_request: Request, context: RouteContext) {
+  const auth = await requireAppUser();
+
+  if (auth.response) {
+    return auth.response;
+  }
+
+  try {
+    const { id } = await context.params;
+    const result = await alignPilotArticleNarration(
+      id,
+      auth.user.ownerEmail,
+      {
+        articleRepository: getArticleRepository(),
+        artifactStorage: getArtifactStorage(),
+      },
+    );
+
+    return NextResponse.json(
+      {
+        alignment: result.alignment,
+        alreadyExisted: result.alreadyExisted,
         estimatedCostUsd: result.estimatedCostUsd,
       },
       { headers: { "cache-control": "no-store" } },

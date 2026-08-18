@@ -936,6 +936,11 @@ button:disabled {
   outline-offset: 2px;
 }
 
+.narration-title {
+  cursor: inherit;
+  padding: 0;
+}
+
 .sentence.playing,
 .sentence.context-selected {
   background: #dcefea;

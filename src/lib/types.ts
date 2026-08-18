@@ -41,6 +41,26 @@ export type ReadingProgress = {
   updatedAt: string;
 };
 
+export type ArticleNarrationCue = {
+  sentenceIndex: number;
+  sentenceText: string;
+  startSeconds: number;
+  endSeconds: number;
+};
+
+export type ArticleNarrationAlignment = {
+  version: 1;
+  model: string;
+  generatedAt: string;
+  transcriptSha256: string;
+  sentenceMapFingerprint: string;
+  sourceCoverage: number;
+  exactMatchRatio: number;
+  maxUnmatchedSourceRun: number;
+  maxUnmatchedTranscriptRun: number;
+  sentenceCues: ArticleNarrationCue[];
+};
+
 export type ArticleNarration = {
   artifactKey: string;
   artifactVisibility: "private" | "public";
@@ -51,6 +71,7 @@ export type ArticleNarration = {
   voice: string;
   generatedAt: string;
   durationSeconds?: number;
+  alignment?: ArticleNarrationAlignment;
 };
 
 export type ArticleFolder = {

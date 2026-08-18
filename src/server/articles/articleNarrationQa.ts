@@ -42,8 +42,8 @@ export function evaluateNarrationTranscript(
   expectedText: string,
   transcript: string,
 ): ArticleNarrationQa {
-  const expected = comparableSpeechText(expectedText);
-  const actual = comparableSpeechText(transcript);
+  const expected = comparableNarrationText(expectedText);
+  const actual = comparableNarrationText(transcript);
   const editDistance = levenshteinDistance(expected, actual);
   const lcs = longestCommonSubsequence(expected, actual);
   const characterErrorRate =
@@ -129,7 +129,7 @@ export function evaluateNarrationTranscript(
   };
 }
 
-function comparableSpeechText(text: string) {
+export function comparableNarrationText(text: string) {
   return Array.from(
     text
       .normalize("NFKC")
@@ -141,7 +141,7 @@ function comparableSpeechText(text: string) {
 function expectedParagraphs(text: string) {
   return text
     .split(/\n+/u)
-    .map(comparableSpeechText)
+    .map(comparableNarrationText)
     .filter(Boolean);
 }
 

@@ -51,7 +51,16 @@ const {
   PilotNarrationError,
   verifyPilotNarrationModelAccess,
 } = await import("../src/server/articles/articleNarrationPilot.ts");
-const { canonicalNarrationSource } = await import(
+const {
+  alignPilotArticleNarration,
+  alignSourceCharacters,
+  buildNarrationAlignment,
+} = await import("../src/server/articles/articleNarrationAlignment.ts");
+const {
+  canonicalNarrationSource,
+  comparableNarrationText,
+  narrationSourceSha256,
+} = await import(
   "../src/server/articles/articleNarrationQa.ts"
 );
 
@@ -451,6 +460,174 @@ test("serves full and ranged narration responses", async () => {
   assert.equal(invalid.headers.get("content-range"), "bytes */10");
 });
 
+test("keeps homophone substitutions mapped to timestamped characters", () => {
+  const result = alignSourceCharacters(
+    Array.from("甲乙丙丁"),
+    Array.from("甲已丙丁"),
+  );
+
+  assert.deepEqual(result.sourceToTranscript, [0, 1, 2, 3]);
+  assert.equal(result.mappedCount, 4);
+  assert.equal(result.exactMatchCount, 3);
+  assert.equal(result.maxUnmatchedSourceRun, 0);
+  assert.equal(result.maxUnmatchedTranscriptRun, 0);
+});
+
+test("detects a hallucinated transcript span even when source coverage is complete", () => {
+  const result = alignSourceCharacters(
+    Array.from("甲乙甲乙"),
+    Array.from("甲乙多余五个字甲乙"),
+  );
+
+  assert.equal(result.mappedCount, 4);
+  assert.equal(result.maxUnmatchedSourceRun, 0);
+  assert.ok(result.maxUnmatchedTranscriptRun > 4);
+});
+
+test("builds exact cues for the 19 narrated body sentences", () => {
+  const article = pilotAlignmentArticleFixture();
+  const transcription = timestampTranscription(article, {
+    replacements: new Map([
+      ["慈", "词"],
+      ["锋", "风"],
+    ]),
+  });
+  const alignment = buildNarrationAlignment(
+    article,
+    transcription,
+    142.104,
+  );
+
+  assert.equal(alignment.model, "whisper-1");
+  assert.equal(alignment.sourceCoverage, 1);
+  assert.ok(alignment.exactMatchRatio > 0.99);
+  assert.equal(alignment.sentenceCues.length, 20);
+  assert.deepEqual(
+    alignment.sentenceCues.slice(1).map(({ sentenceIndex }) => sentenceIndex),
+    [6, 7, 8, 9, 10, 11, 13, 14, 16, 18, 20, 21, 22, 23, 25, 27, 28, 29, 30],
+  );
+  assert.ok(
+    alignment.sentenceCues.find(({ sentenceIndex }) => sentenceIndex === 29)
+      .startSeconds -
+      alignment.sentenceCues.find(({ sentenceIndex }) => sentenceIndex === 6)
+        .startSeconds >
+      30,
+  );
+  assert.ok(
+    alignment.sentenceCues.at(-1).endSeconds > 137,
+  );
+});
+
+test("transcribes and atomically attaches timestamps to the existing audio", async () => {
+  const article = pilotAlignmentArticleFixture();
+  const transcription = timestampTranscription(article);
+  const calls = [];
+  const result = await alignPilotArticleNarration(
+    article.id,
+    "cmsflash99@gmail.com",
+    {
+      articleRepository: {
+        async findById() {
+          return article;
+        },
+        async addProcessingCost() {
+          throw new Error("successful alignment records cost with its update");
+        },
+        async updateNarration(id, ownerEmail, narration, costUsd) {
+          calls.push(["update", id, ownerEmail, costUsd]);
+          return { ...article, narration };
+        },
+      },
+      artifactStorage: {
+        async get(key, visibility) {
+          calls.push(["get", key, visibility]);
+          return {
+            key,
+            contentType: "audio/mpeg",
+            byteLength: article.narration.byteLength,
+            body: Buffer.alloc(article.narration.byteLength),
+          };
+        },
+      },
+      apiKey: "test-key",
+      async fetch(url, init) {
+        calls.push([
+          "transcribe",
+          init.body.get("model"),
+          init.body.get("response_format"),
+          init.body.getAll("timestamp_granularities[]"),
+        ]);
+        assert.match(url, /\/audio\/transcriptions$/u);
+        return Response.json(transcription);
+      },
+    },
+  );
+
+  assert.equal(result.alreadyExisted, false);
+  assert.equal(result.alignment.sentenceCues.length, 20);
+  assert.equal(result.estimatedCostUsd, 0.01421);
+  assert.deepEqual(calls[0].slice(0, 3), [
+    "get",
+    article.narration.artifactKey,
+    "public",
+  ]);
+  assert.deepEqual(calls[1], [
+    "transcribe",
+    "whisper-1",
+    "verbose_json",
+    ["word"],
+  ]);
+  assert.deepEqual(calls[2], [
+    "update",
+    article.id,
+    "cmsflash99@gmail.com",
+    0.01421,
+  ]);
+});
+
+test("reuses a valid existing alignment without another paid transcription", async () => {
+  const article = pilotAlignmentArticleFixture();
+  const alignment = buildNarrationAlignment(
+    article,
+    timestampTranscription(article),
+    142.104,
+  );
+  const alignedArticle = {
+    ...article,
+    narration: { ...article.narration, alignment },
+  };
+  const result = await alignPilotArticleNarration(
+    article.id,
+    "cmsflash99@gmail.com",
+    {
+      articleRepository: {
+        async findById() {
+          return alignedArticle;
+        },
+        async addProcessingCost() {
+          throw new Error("existing timestamps must not add cost");
+        },
+        async updateNarration() {
+          throw new Error("existing timestamps must not be rewritten");
+        },
+      },
+      artifactStorage: {
+        async get() {
+          throw new Error("existing timestamps must not reload audio");
+        },
+      },
+      async fetch() {
+        throw new Error("existing timestamps must not call OpenAI");
+      },
+      apiKey: "test-key",
+    },
+  );
+
+  assert.equal(result.alreadyExisted, true);
+  assert.equal(result.alignment, alignment);
+  assert.equal(result.estimatedCostUsd, undefined);
+});
+
 function articleFixture() {
   const timestamp = "2026-08-18T04:00:00.000Z";
 
@@ -497,6 +674,88 @@ function pilotArticleFixture() {
     title: "黑风山土地",
     textContent: pilotBody,
     processingCostUsd: 0,
+  };
+}
+
+function pilotAlignmentArticleFixture() {
+  const timestamp = "2026-08-18T05:27:32.281Z";
+  const bodyBlocks = pilotBody.split("\n\n").map((text, index) => ({
+    id: `paragraph-${index + 1}`,
+    type: "paragraph",
+    text,
+  }));
+
+  return {
+    id: "black-myth-journal-5df74e22bc38174a8a99c9b2",
+    title: "黑风山土地",
+    sourceType: "url",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    wordCount: 631,
+    estimatedMinutes: 3,
+    sentenceCount: 31,
+    processingCostUsd: 0.098253,
+    progress: {
+      sentenceIndex: 0,
+      percent: 0,
+      updatedAt: timestamp,
+    },
+    contentHtml: "",
+    textContent: pilotBody,
+    blocks: [
+      {
+        id: "image-1",
+        type: "image",
+        alt: "黑风山土地 实机图",
+        caption: "实机图",
+      },
+      {
+        id: "image-2",
+        type: "image",
+        alt: "黑风山土地 影神图",
+        caption: "影神图",
+      },
+      {
+        id: "image-3",
+        type: "image",
+        alt: "黑风山土地 原画",
+        caption: "原画",
+      },
+      ...bodyBlocks,
+    ],
+    narration: {
+      artifactKey: "articles/black-myth/audio/pilot.mp3",
+      artifactVisibility: "public",
+      contentType: "audio/mpeg",
+      byteLength: 2_273_664,
+      sourceTextSha256: narrationSourceSha256("黑风山土地", pilotBody),
+      model: "gpt-4o-mini-tts-2025-12-15",
+      voice: "cedar",
+      generatedAt: timestamp,
+      durationSeconds: 142.104,
+    },
+  };
+}
+
+function timestampTranscription(article, options = {}) {
+  const source = Array.from(
+    comparableNarrationText(
+      canonicalNarrationSource(article.title, article.textContent),
+    ),
+  );
+  const characters = source.map(
+    (character) => options.replacements?.get(character) ?? character,
+  );
+  const words = characters.map((word, index) => ({
+    word,
+    start: 0.2 + index * 0.27,
+    end: 0.2 + (index + 1) * 0.27,
+  }));
+
+  return {
+    text: characters.join(""),
+    duration: 142.104,
+    words,
   };
 }
 

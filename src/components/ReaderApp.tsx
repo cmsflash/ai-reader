@@ -58,8 +58,12 @@ import {
 } from "@/lib/speechLanguage";
 import {
   articleNarrationAudioUrl,
+  matchingNarrationCues,
   narrationProgressForSentenceIndex,
   narrationSentenceIndexAtProgress,
+  narrationSentenceIndexAtTime,
+  narrationTimeForSentenceIndex,
+  narrationTitleSentenceIndex,
 } from "@/lib/narrationPlayback";
 import {
   integrationSyncMaxRequests,
@@ -1246,7 +1250,16 @@ export function ReaderApp() {
       const resume = narrationResumeRef.current;
       const resumeTime =
         resume?.articleId === articleToPlay.id ? resume.currentTime : 0;
-      const requestedProgress = seekToSentence
+      const narrationCues = matchingNarrationCues(
+        articleToPlay.narration?.alignment,
+        sentencesRef.current,
+        articleToPlay.title,
+        articleToPlay.narration?.durationSeconds,
+      );
+      const requestedCueTime = seekToSentence
+        ? narrationTimeForSentenceIndex(narrationCues, sentenceIndex)
+        : null;
+      const requestedProgress = seekToSentence && requestedCueTime === null
         ? narrationProgressForSentenceIndex(
             sentencesRef.current,
             sentenceIndex,
@@ -1278,14 +1291,14 @@ export function ReaderApp() {
           : duration > 0
             ? Math.min(Math.max(audio.currentTime / duration, 0), 1)
             : 0;
-        const sentenceIndex = narrationSentenceIndexAtProgress(
-          sentencesRef.current,
-          progress,
-        );
+        const sentenceIndex =
+          narrationSentenceIndexAtTime(narrationCues, audio.currentTime) ??
+          narrationSentenceIndexAtProgress(sentencesRef.current, progress);
 
         setCurrentSentence(sentenceIndex);
 
         if (
+          sentenceIndex >= 0 &&
           sentenceIndex !== lastSavedSentence &&
           (complete || audio.currentTime - lastSavedAudioTime >= 5)
         ) {
@@ -1300,9 +1313,10 @@ export function ReaderApp() {
       await new Promise<void>((resolve, reject) => {
         audio.onloadedmetadata = () => {
           const requestedTime =
-            requestedProgress === null
+            requestedCueTime ??
+            (requestedProgress === null
               ? resumeTime
-              : requestedProgress * audio.duration;
+              : requestedProgress * audio.duration);
 
           if (requestedTime > 0 && requestedTime < audio.duration) {
             audio.currentTime = requestedTime;
@@ -3209,7 +3223,22 @@ export function ReaderApp() {
                           onSentenceTap={handleSentenceTap}
                         />
                       ) : (
-                        article.title
+                        <span
+                          className={`sentence narration-title${
+                            playingSentenceIndex ===
+                            narrationTitleSentenceIndex
+                              ? " playing"
+                              : ""
+                          }`}
+                          aria-current={
+                            playingSentenceIndex ===
+                            narrationTitleSentenceIndex
+                              ? "true"
+                              : undefined
+                          }
+                        >
+                          {article.title}
+                        </span>
                       )}
                     </h1>
                     <div
