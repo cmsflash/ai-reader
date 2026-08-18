@@ -65,10 +65,13 @@ export async function archiveArticleArtifacts(
 }
 
 export async function deleteArticleArtifacts(article: Article) {
-  const keys = article.blocks
+  const imageKeys = article.blocks
     .filter((block): block is Extract<ArticleBlock, { type: "image" }> => block.type === "image")
     .map((block) => block.artifactKey)
     .filter((key): key is string => Boolean(key));
+  const keys = article.narration?.artifactKey
+    ? [...imageKeys, article.narration.artifactKey]
+    : imageKeys;
 
   await Promise.allSettled(keys.map((key) => getArtifactStorage().delete(key)));
 }

@@ -3,6 +3,7 @@ import path from "node:path";
 import type {
   ArtifactBody,
   ArtifactStorage,
+  ArtifactVisibility,
   StoreArtifactInput,
   StoredArtifact,
 } from "@/server/ports/artifactStorage";
@@ -51,7 +52,11 @@ export class LocalFileArtifactStorage implements ArtifactStorage {
     };
   }
 
-  async get(key: string): Promise<ArtifactBody | null> {
+  async get(
+    key: string,
+    visibility: ArtifactVisibility = "public",
+  ): Promise<ArtifactBody | null> {
+    void visibility;
     const normalizedKey = normalizeKey(key);
     const artifactPath = this.pathForKey(normalizedKey);
 

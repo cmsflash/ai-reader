@@ -431,6 +431,59 @@ test("archive-only updates preserve the folder and null folder moves are rejecte
   assert.ok(archived?.archivedAt);
 });
 
+test("updates and maps owner-scoped pre-generated narration", async () => {
+  const queries = [];
+  const narration = {
+    artifactKey: "articles/article-1/audio/body.mp3",
+    artifactVisibility: "public",
+    contentType: "audio/mpeg",
+    byteLength: 42_000,
+    sourceTextSha256: "b".repeat(64),
+    model: "gpt-4o-mini-tts",
+    voice: "cedar",
+    generatedAt: "2026-08-18T04:00:00.000Z",
+  };
+  const repository = new PostgresArticleRepository({
+    async query(statement, params) {
+      const normalized = normalizeQuery(statement);
+      queries.push({ statement: normalized, params });
+
+      if (normalized.startsWith("UPDATE articles")) {
+        return [
+          {
+            ...articleRow("article-1"),
+            updated_at: params[1],
+            narration: params[2],
+          },
+        ];
+      }
+
+      throw new Error(`Unexpected query: ${normalized}`);
+    },
+  });
+
+  const updated = await repository.updateNarration(
+    "article-1",
+    " Reader@Example.com ",
+    narration,
+    0.042,
+    true,
+  );
+
+  assert.deepEqual(updated?.narration, narration);
+  assert.equal(queries.length, 1);
+  assert.deepEqual(queries[0].params.slice(0, 1), ["article-1"]);
+  assert.equal(queries[0].params[2], JSON.stringify(narration));
+  assert.equal(queries[0].params[3], 0.042);
+  assert.equal(queries[0].params[4], "reader@example.com");
+  assert.equal(queries[0].params[5], true);
+  assert.match(queries[0].statement, /narration = \$3::jsonb/);
+  assert.match(queries[0].statement, /processing_cost_usd = ROUND/);
+  assert.match(queries[0].statement, /owner_email = \$5/);
+  assert.match(queries[0].statement, /NOT \$6::boolean OR narration IS NULL/);
+  assert.match(queries[0].statement, /RETURNING .* narration$/);
+});
+
 function normalizeQuery(statement) {
   return statement.replace(/\s+/g, " ").trim();
 }
@@ -454,6 +507,24 @@ function articleSummaryRow(id, overrides = {}) {
     progress_updated_at: "2026-08-11T09:00:00.000Z",
     excerpt: `Excerpt for ${id}`,
     thumbnail_url: null,
+    ...overrides,
+  };
+}
+
+function articleRow(id, overrides = {}) {
+  return {
+    ...articleSummaryRow(id),
+    owner_email: "reader@example.com",
+    content_html: `<p>Article ${id}</p>`,
+    text_content: `Article ${id}`,
+    blocks: [
+      {
+        id: "paragraph-0",
+        type: "paragraph",
+        text: `Article ${id}`,
+      },
+    ],
+    narration: null,
     ...overrides,
   };
 }

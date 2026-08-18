@@ -9,6 +9,7 @@ import {
 import type {
   ArtifactBody,
   ArtifactStorage,
+  ArtifactVisibility,
   StoreArtifactInput,
   StoredArtifact,
 } from "@/server/ports/artifactStorage";
@@ -32,9 +33,12 @@ export class VercelBlobArtifactStorage implements ArtifactStorage {
     };
   }
 
-  async get(key: string): Promise<ArtifactBody | null> {
+  async get(
+    key: string,
+    visibility: ArtifactVisibility = "public",
+  ): Promise<ArtifactBody | null> {
     const normalizedKey = normalizeKey(key);
-    const result = await get(normalizedKey, { access: "public" });
+    const result = await get(normalizedKey, { access: visibility });
 
     if (!result || result.statusCode !== 200) {
       return null;

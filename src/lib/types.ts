@@ -41,6 +41,18 @@ export type ReadingProgress = {
   updatedAt: string;
 };
 
+export type ArticleNarration = {
+  artifactKey: string;
+  artifactVisibility: "private" | "public";
+  contentType: string;
+  byteLength: number;
+  sourceTextSha256: string;
+  model: string;
+  voice: string;
+  generatedAt: string;
+  durationSeconds?: number;
+};
+
 export type ArticleFolder = {
   id: string;
   name: string;
@@ -72,6 +84,7 @@ export type Article = ArticleSummary & {
   contentHtml: string;
   textContent: string;
   blocks: ArticleBlock[];
+  narration?: ArticleNarration;
 };
 
 export type ArticleStore = {

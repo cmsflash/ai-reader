@@ -157,6 +157,65 @@ test("import progress advances monotonically under concurrent updates", async ()
   }
 });
 
+test("persists and clears owner-scoped pre-generated narration", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-reader-store-"));
+  const storePath = path.join(directory, "articles.json");
+  const repository = new LocalJsonArticleRepository({ storePath });
+  const narration = {
+    artifactKey: "articles/narrated/audio/body.mp3",
+    artifactVisibility: "public",
+    contentType: "audio/mpeg",
+    byteLength: 42_000,
+    sourceTextSha256: "a".repeat(64),
+    model: "gpt-4o-mini-tts",
+    voice: "cedar",
+    generatedAt: "2026-08-18T04:00:00.000Z",
+    durationSeconds: 31.25,
+  };
+
+  try {
+    await repository.create(article("narrated"), "reader@example.com");
+
+    assert.equal(
+      await repository.updateNarration(
+        "narrated",
+        "other@example.com",
+        narration,
+      ),
+      null,
+    );
+
+    const updated = await repository.updateNarration(
+      "narrated",
+      "reader@example.com",
+      narration,
+      0.042,
+      true,
+    );
+    assert.deepEqual(updated?.narration, narration);
+    assert.equal(updated?.processingCostUsd, 0.042);
+
+    const persisted = JSON.parse(await readFile(storePath, "utf8"));
+    assert.deepEqual(persisted.articles[0].narration, narration);
+
+    const cleared = await repository.updateNarration(
+      "narrated",
+      "reader@example.com",
+      null,
+    );
+    assert.equal(cleared?.narration, undefined);
+    assert.equal(
+      Object.hasOwn(
+        JSON.parse(await readFile(storePath, "utf8")).articles[0],
+        "narration",
+      ),
+      false,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("persists owner-scoped folders and archive state without affecting article content", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "ai-reader-store-"));
   const repository = new LocalJsonArticleRepository({

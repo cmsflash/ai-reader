@@ -9,6 +9,7 @@ import type {
 import type {
   Article,
   ArticleFolder,
+  ArticleNarration,
   ArticleSummary,
   ReadingProgress,
 } from "@/lib/types";
@@ -66,6 +67,13 @@ export interface ArticleRepository {
     percent: number,
   ): Promise<Article | null>;
   addProcessingCost(id: string, ownerEmail: string, costUsd: number): Promise<Article | null>;
+  updateNarration(
+    id: string,
+    ownerEmail: string,
+    narration: ArticleNarration | null,
+    costUsd?: number,
+    onlyIfEmpty?: boolean,
+  ): Promise<Article | null>;
   updateOrganization(
     id: string,
     ownerEmail: string,

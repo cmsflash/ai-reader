@@ -20,7 +20,10 @@ export type ArtifactBody = StoredArtifact & {
 
 export interface ArtifactStorage {
   put(input: StoreArtifactInput): Promise<StoredArtifact>;
-  get(key: string): Promise<ArtifactBody | null>;
+  get(
+    key: string,
+    visibility?: ArtifactVisibility,
+  ): Promise<ArtifactBody | null>;
   getUrl(key: string): Promise<string | null>;
   delete(key: string): Promise<void>;
 }

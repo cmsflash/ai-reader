@@ -9,6 +9,7 @@ import type {
   Article,
   ArticleBlock,
   ArticleFolder,
+  ArticleNarration,
   ReadingProgress,
   SourceType,
 } from "@/lib/types";
@@ -43,11 +44,12 @@ type PostgresArticleRow = {
   content_html: string;
   text_content: string;
   blocks: ArticleBlock[] | string;
+  narration: ArticleNarration | string | null;
 };
 
 type PostgresArticleSummaryRow = Omit<
   PostgresArticleRow,
-  "owner_email" | "content_html" | "text_content" | "blocks"
+  "owner_email" | "content_html" | "text_content" | "blocks" | "narration"
 > & {
   excerpt: string | null;
   thumbnail_url: string | null;
@@ -339,12 +341,13 @@ export class PostgresArticleRepository implements ArticleRepository {
           content_html,
           text_content,
           blocks,
+          narration,
           excerpt,
           thumbnail_url,
           preview_version,
           content_fingerprint
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::timestamptz, $10, $11, $12, $13, $14, $15, $16::timestamptz, $17, $18, $19::jsonb, $20, $21, 2, $22)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9::timestamptz, $10, $11, $12, $13, $14, $15, $16::timestamptz, $17, $18, $19::jsonb, $20::jsonb, $21, $22, 2, $23)
         ON CONFLICT DO NOTHING
         RETURNING ${articleColumns}
       `,
@@ -471,6 +474,40 @@ export class PostgresArticleRepository implements ArticleRepository {
         RETURNING ${articleColumns}
       `,
       [id, new Date().toISOString(), safeCost, normalizeOwnerEmail(ownerEmail)],
+    );
+
+    return rows[0] ? rowToArticle(rows[0]) : null;
+  }
+
+  async updateNarration(
+    id: string,
+    ownerEmail: string,
+    narration: ArticleNarration | null,
+    costUsd = 0,
+    onlyIfEmpty = false,
+  ) {
+    const safeCost = clampNumber(costUsd, 0, Number.MAX_SAFE_INTEGER);
+    const rows = await this.queryArticles(
+      `
+        UPDATE articles
+        SET
+          updated_at = $2::timestamptz,
+          narration = $3::jsonb,
+          processing_cost_usd = ROUND((processing_cost_usd + $4::numeric), 6)
+        WHERE
+          id = $1
+          AND owner_email = $5
+          AND (NOT $6::boolean OR narration IS NULL)
+        RETURNING ${articleColumns}
+      `,
+      [
+        id,
+        new Date().toISOString(),
+        narration ? JSON.stringify(narration) : null,
+        safeCost,
+        normalizeOwnerEmail(ownerEmail),
+        onlyIfEmpty,
+      ],
     );
 
     return rows[0] ? rowToArticle(rows[0]) : null;
@@ -699,7 +736,8 @@ const articleColumns = `
   progress_updated_at,
   content_html,
   text_content,
-  blocks
+  blocks,
+  narration
 `;
 
 function getSql() {
@@ -737,6 +775,7 @@ function articleParams(article: Article) {
     article.contentHtml,
     article.textContent,
     JSON.stringify(article.blocks),
+    article.narration ? JSON.stringify(article.narration) : null,
   ];
 }
 
@@ -804,6 +843,7 @@ function rowToArticle(row: PostgresArticleRow): Article {
     contentHtml: row.content_html,
     textContent: row.text_content,
     blocks,
+    narration: parseNarration(row.narration),
   };
 }
 
@@ -860,6 +900,18 @@ function parseBlocks(blocks: ArticleBlock[] | string): ArticleBlock[] {
 
   const parsed = JSON.parse(blocks) as unknown;
   return Array.isArray(parsed) ? (parsed as ArticleBlock[]) : [];
+}
+
+function parseNarration(
+  narration: ArticleNarration | string | null,
+): ArticleNarration | undefined {
+  if (!narration) {
+    return undefined;
+  }
+
+  return typeof narration === "string"
+    ? (JSON.parse(narration) as ArticleNarration)
+    : narration;
 }
 
 function isoString(value: string | Date) {

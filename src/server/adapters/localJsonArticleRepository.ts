@@ -5,6 +5,7 @@ import { filterAndSortArticles } from "../../lib/articleList.ts";
 import type {
   Article,
   ArticleFolder,
+  ArticleNarration,
   ArticleStore,
   ReadingProgress,
 } from "@/lib/types";
@@ -339,6 +340,50 @@ export class LocalJsonArticleRepository implements ArticleRepository {
         updatedAt: now,
         processingCostUsd: roundCost(
           (article.processingCostUsd ?? 0) + safeCost,
+        ),
+      };
+      const nextArticles = [...store.articles];
+      nextArticles[articleIndex] = updatedArticle;
+
+      return {
+        store: {
+          ...store,
+          articles: nextArticles,
+        },
+        value: updatedArticle,
+      };
+    });
+  }
+
+  async updateNarration(
+    id: string,
+    ownerEmail: string,
+    narration: ArticleNarration | null,
+    costUsd = 0,
+    onlyIfEmpty = false,
+  ) {
+    return this.mutateStore((store) => {
+      const articleIndex = store.articles.findIndex(
+        (article) =>
+          article.id === id && articleBelongsToOwner(article, ownerEmail),
+      );
+
+      if (articleIndex === -1) {
+        return { value: null };
+      }
+
+      if (onlyIfEmpty && store.articles[articleIndex].narration) {
+        return { value: null };
+      }
+
+      const now = new Date().toISOString();
+      const updatedArticle: Article = {
+        ...store.articles[articleIndex],
+        updatedAt: now,
+        narration: narration ?? undefined,
+        processingCostUsd: roundCost(
+          (store.articles[articleIndex].processingCostUsd ?? 0) +
+            clampNumber(costUsd, 0, Number.MAX_SAFE_INTEGER),
         ),
       };
       const nextArticles = [...store.articles];

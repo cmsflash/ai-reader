@@ -57,6 +57,11 @@ import {
   type SpeechLanguage,
 } from "@/lib/speechLanguage";
 import {
+  articleNarrationAudioUrl,
+  narrationProgressForSentenceIndex,
+  narrationSentenceIndexAtProgress,
+} from "@/lib/narrationPlayback";
+import {
   integrationSyncMaxRequests,
   integrationSyncRequestBatchSize,
   mergeIntegrationSyncResponses,
@@ -373,6 +378,11 @@ export function ReaderApp() {
   const restoredArticleIdRef = useRef<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+  const activeNarrationArticleIdRef = useRef<string | null>(null);
+  const narrationResumeRef = useRef<{
+    articleId: string;
+    currentTime: number;
+  } | null>(null);
   const browserVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const browserUtterancesRef = useRef<SpeechSynthesisUtterance[]>([]);
   const articleActionReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -606,6 +616,9 @@ export function ReaderApp() {
 
   useEffect(() => {
     rateRef.current = rate;
+    if (audioRef.current) {
+      audioRef.current.playbackRate = rate;
+    }
   }, [rate]);
 
   useEffect(() => {
@@ -1221,8 +1234,96 @@ export function ReaderApp() {
     [cleanupAudio],
   );
 
+  const playArticleNarration = useCallback(
+    async (
+      articleToPlay: Article,
+      session: number,
+      sentenceIndex: number,
+      seekToSentence: boolean,
+    ) => {
+      cleanupAudio();
+      const audio = new Audio(articleNarrationAudioUrl(articleToPlay.id));
+      const resume = narrationResumeRef.current;
+      const resumeTime =
+        resume?.articleId === articleToPlay.id ? resume.currentTime : 0;
+      const requestedProgress = seekToSentence
+        ? narrationProgressForSentenceIndex(
+            sentencesRef.current,
+            sentenceIndex,
+          )
+        : null;
+      let lastSavedSentence = -1;
+      let lastSavedAudioTime = Number.NEGATIVE_INFINITY;
+
+      narrationResumeRef.current = null;
+      activeNarrationArticleIdRef.current = articleToPlay.id;
+      audio.preload = "auto";
+      audio.playbackRate = rateRef.current;
+      audioRef.current = audio;
+
+      const updateNarrationProgress = (complete = false) => {
+        if (speechSessionRef.current !== session) {
+          return;
+        }
+
+        const configuredDuration = articleToPlay.narration?.durationSeconds;
+        const duration =
+          Number.isFinite(audio.duration) && audio.duration > 0
+            ? audio.duration
+            : typeof configuredDuration === "number" && configuredDuration > 0
+              ? configuredDuration
+              : 0;
+        const progress = complete
+          ? 1
+          : duration > 0
+            ? Math.min(Math.max(audio.currentTime / duration, 0), 1)
+            : 0;
+        const sentenceIndex = narrationSentenceIndexAtProgress(
+          sentencesRef.current,
+          progress,
+        );
+
+        setCurrentSentence(sentenceIndex);
+
+        if (
+          sentenceIndex !== lastSavedSentence &&
+          (complete || audio.currentTime - lastSavedAudioTime >= 5)
+        ) {
+          lastSavedSentence = sentenceIndex;
+          lastSavedAudioTime = audio.currentTime;
+          void saveProgress(sentenceIndex).catch((saveError) => {
+            setError(messageFromError(saveError));
+          });
+        }
+      };
+
+      await new Promise<void>((resolve, reject) => {
+        audio.onloadedmetadata = () => {
+          const requestedTime =
+            requestedProgress === null
+              ? resumeTime
+              : requestedProgress * audio.duration;
+
+          if (requestedTime > 0 && requestedTime < audio.duration) {
+            audio.currentTime = requestedTime;
+          } else {
+            updateNarrationProgress();
+          }
+        };
+        audio.ontimeupdate = () => updateNarrationProgress();
+        audio.onended = () => {
+          updateNarrationProgress(true);
+          resolve();
+        };
+        audio.onerror = () => reject(new Error("Saved narration playback failed."));
+        void audio.play().catch(reject);
+      });
+    },
+    [cleanupAudio, saveProgress],
+  );
+
   const speakFrom = useCallback(
-    (sentenceIndex: number) => {
+    (sentenceIndex: number, seekToSentence = false) => {
       const sentences = sentencesRef.current;
 
       if (sentences.length === 0) {
@@ -1240,6 +1341,32 @@ export function ReaderApp() {
       browserUtterancesRef.current = [];
       setIsSpeaking(true);
       setError(null);
+
+      if (article?.narration) {
+        void playArticleNarration(
+          article,
+          session,
+          startIndex,
+          seekToSentence,
+        )
+          .then(() => {
+            if (speechSessionRef.current === session) {
+              activeNarrationArticleIdRef.current = null;
+              narrationResumeRef.current = null;
+              cleanupAudio();
+              setIsSpeaking(false);
+            }
+          })
+          .catch((playbackError) => {
+            if (speechSessionRef.current === session) {
+              activeNarrationArticleIdRef.current = null;
+              cleanupAudio();
+              setIsSpeaking(false);
+              setError(messageFromError(playbackError));
+            }
+          });
+        return;
+      }
 
       if (speechLanguage === "zh-CN") {
         speakMandarinFrom(startIndex, session);
@@ -1288,7 +1415,9 @@ export function ReaderApp() {
     },
     [
       cleanupAudio,
+      article,
       playElevenLabsAudio,
+      playArticleNarration,
       saveProgress,
       speakMandarinFrom,
       speakWithBrowser,
@@ -1298,6 +1427,22 @@ export function ReaderApp() {
 
   const stopSpeaking = useCallback(() => {
     speechSessionRef.current += 1;
+    const audio = audioRef.current;
+    const activeNarrationArticleId = activeNarrationArticleIdRef.current;
+
+    if (
+      audio &&
+      activeNarrationArticleId &&
+      Number.isFinite(audio.currentTime) &&
+      audio.currentTime > 0
+    ) {
+      narrationResumeRef.current = {
+        articleId: activeNarrationArticleId,
+        currentTime: audio.currentTime,
+      };
+    }
+
+    activeNarrationArticleIdRef.current = null;
     cleanupAudio();
     window.speechSynthesis?.cancel();
     browserUtterancesRef.current = [];
@@ -1791,7 +1936,7 @@ export function ReaderApp() {
       void saveProgress(sentenceIndex).catch((saveError) => {
         setError(messageFromError(saveError));
       });
-      speakFrom(sentenceIndex);
+      speakFrom(sentenceIndex, true);
     },
     [saveProgress, speakFrom],
   );
@@ -2916,8 +3061,20 @@ export function ReaderApp() {
                 <button
                   className="round-button primary"
                   type="button"
-                  title={isSpeaking ? "Pause" : "Read aloud"}
-                  aria-label={isSpeaking ? "Pause" : "Read aloud"}
+                  title={
+                    isSpeaking
+                      ? "Pause"
+                      : article.narration
+                        ? "Play saved AI narration"
+                        : "Read aloud"
+                  }
+                  aria-label={
+                    isSpeaking
+                      ? "Pause"
+                      : article.narration
+                        ? "Play saved AI narration"
+                        : "Read aloud"
+                  }
                   onClick={() => {
                     if (isSpeaking) {
                       stopSpeaking();
@@ -3060,8 +3217,23 @@ export function ReaderApp() {
                       aria-label="Article metadata"
                     >
                       <span>{article.wordCount.toLocaleString()} words</span>
-                      <span>{article.estimatedMinutes} min audio</span>
+                      <span>
+                        {article.narration?.durationSeconds
+                          ? Math.max(
+                              1,
+                              Math.round(
+                                article.narration.durationSeconds / 60,
+                              ),
+                            )
+                          : article.estimatedMinutes}{" "}
+                        min audio
+                      </span>
                       <span>{formatDate(article.createdAt)}</span>
+                      {article.narration ? (
+                        <span title="This audio was generated by AI.">
+                          AI narration
+                        </span>
+                      ) : null}
                       <span>
                         {formatCost(article.processingCostUsd ?? 0)} API cost
                       </span>

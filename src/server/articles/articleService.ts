@@ -17,13 +17,16 @@ import type {
   ArticleDeduplicationReason,
 } from "@/server/articles/articleDeduplication";
 import { getArticleRepository } from "@/server/runtime/articleRepository";
+import { getArtifactStorage } from "@/server/runtime/artifactStorage";
 import { dismissLocalImportsForArticle } from "@/server/integrations/importRecords";
 import type {
   ArticleOrganizationPatch,
   ArticleProgressPatch,
+  ArticleRepository,
 } from "@/server/ports/articleRepository";
 import { toArticleSummary } from "@/server/ports/articleRepository";
-import type { Article } from "@/lib/types";
+import type { ArtifactStorage } from "@/server/ports/artifactStorage";
+import type { Article, ArticleNarration } from "@/lib/types";
 import {
   decodeArticleListCursor,
   encodeArticleListCursor,
@@ -91,6 +94,42 @@ export async function createArticleFolder(name: string, ownerEmail: string) {
 
 export async function getSavedArticle(id: string, ownerEmail: string) {
   return getArticleRepository().findById(id, ownerEmail);
+}
+
+export async function getSavedArticleNarrationArtifact(
+  id: string,
+  ownerEmail: string,
+  dependencies: {
+    articleRepository?: Pick<ArticleRepository, "findById">;
+    artifactStorage?: Pick<ArtifactStorage, "get">;
+  } = {},
+) {
+  const article = await (
+    dependencies.articleRepository ?? getArticleRepository()
+  ).findById(id, ownerEmail);
+
+  if (!article?.narration) {
+    return null;
+  }
+
+  const artifact = await (
+    dependencies.artifactStorage ?? getArtifactStorage()
+  ).get(
+    article.narration.artifactKey,
+    article.narration.artifactVisibility,
+  );
+
+  return artifact?.contentType.toLowerCase().startsWith("audio/")
+    ? { article, artifact }
+    : null;
+}
+
+export async function updateSavedArticleNarration(
+  id: string,
+  ownerEmail: string,
+  narration: ArticleNarration | null,
+) {
+  return getArticleRepository().updateNarration(id, ownerEmail, narration);
 }
 
 export async function importUrlArticle(
