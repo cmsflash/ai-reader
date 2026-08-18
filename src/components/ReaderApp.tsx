@@ -52,6 +52,11 @@ import {
 } from "@/lib/articleImage";
 import { sentenceHighlightState } from "@/lib/sentenceHighlight";
 import {
+  browserSpeechPlan,
+  detectSpeechLanguage,
+  type SpeechLanguage,
+} from "@/lib/speechLanguage";
+import {
   integrationSyncMaxRequests,
   integrationSyncRequestBatchSize,
   mergeIntegrationSyncResponses,
@@ -368,6 +373,8 @@ export function ReaderApp() {
   const restoredArticleIdRef = useRef<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+  const browserVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
+  const browserUtterancesRef = useRef<SpeechSynthesisUtterance[]>([]);
   const articleActionReturnFocusRef = useRef<HTMLElement | null>(null);
   const articleListGenerationRef = useRef(0);
   const articleListLoadedCountRef = useRef(0);
@@ -392,6 +399,10 @@ export function ReaderApp() {
 
     return annotateBlocks(article.blocks);
   }, [article]);
+  const speechLanguage = useMemo(
+    () => (article ? detectSpeechLanguage(article.textContent) : undefined),
+    [article],
+  );
 
   const selectedPendingImport =
     pendingImports.find((pendingImport) => pendingImport.id === selectedId) ??
@@ -596,6 +607,29 @@ export function ReaderApp() {
   useEffect(() => {
     rateRef.current = rate;
   }, [rate]);
+
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) {
+      return;
+    }
+
+    const refreshBrowserVoices = () => {
+      browserVoicesRef.current = window.speechSynthesis.getVoices();
+    };
+
+    refreshBrowserVoices();
+    window.speechSynthesis.addEventListener(
+      "voiceschanged",
+      refreshBrowserVoices,
+    );
+
+    return () => {
+      window.speechSynthesis.removeEventListener(
+        "voiceschanged",
+        refreshBrowserVoices,
+      );
+    };
+  }, []);
 
   useEffect(() => {
     articleListLoadedCountRef.current = articles.length;
@@ -984,17 +1018,138 @@ export function ReaderApp() {
     }
   }, []);
 
-  const speakWithBrowser = useCallback((text: string, onEnd: () => void) => {
-    if (!("speechSynthesis" in window)) {
-      throw new Error("No speech engine is available.");
-    }
+  const browserUtterance = useCallback(
+    (text: string, language?: SpeechLanguage) => {
+      if (!("speechSynthesis" in window)) {
+        throw new Error("No speech engine is available.");
+      }
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = rateRef.current;
-    utterance.onend = onEnd;
-    utterance.onerror = () => onEnd();
-    window.speechSynthesis.speak(utterance);
-  }, []);
+      const plan = browserSpeechPlan(
+        text,
+        browserVoicesRef.current.length > 0
+          ? browserVoicesRef.current
+          : window.speechSynthesis.getVoices(),
+        language,
+      );
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = rateRef.current;
+
+      if (plan.lang) {
+        utterance.lang = plan.lang;
+      }
+
+      if (plan.voice) {
+        utterance.voice = plan.voice;
+      }
+
+      return utterance;
+    },
+    [],
+  );
+
+  const releaseBrowserUtterance = useCallback(
+    (utterance: SpeechSynthesisUtterance) => {
+      browserUtterancesRef.current = browserUtterancesRef.current.filter(
+        (queuedUtterance) => queuedUtterance !== utterance,
+      );
+    },
+    [],
+  );
+
+  const speakWithBrowser = useCallback(
+    (
+      text: string,
+      language: SpeechLanguage | undefined,
+      onEnd: () => void,
+    ) => {
+      const utterance = browserUtterance(text, language);
+      browserUtterancesRef.current.push(utterance);
+      utterance.onend = () => {
+        releaseBrowserUtterance(utterance);
+        onEnd();
+      };
+      utterance.onerror = () => {
+        releaseBrowserUtterance(utterance);
+        onEnd();
+      };
+      window.speechSynthesis.speak(utterance);
+    },
+    [browserUtterance, releaseBrowserUtterance],
+  );
+
+  const speakMandarinFrom = useCallback(
+    (startIndex: number, session: number) => {
+      const sentences = sentencesRef.current;
+      let nextIndex = startIndex;
+
+      const enqueueNext = () => {
+        if (
+          speechSessionRef.current !== session ||
+          nextIndex >= sentences.length
+        ) {
+          return false;
+        }
+
+        const segment = sentences[nextIndex];
+        const segmentIndex = nextIndex;
+        nextIndex += 1;
+        const utterance = browserUtterance(segment.text);
+        browserUtterancesRef.current.push(utterance);
+
+        utterance.onstart = () => {
+          if (speechSessionRef.current !== session) {
+            return;
+          }
+
+          setCurrentSentence(segment.sentenceIndex);
+          void saveProgress(segment.sentenceIndex).catch((saveError) => {
+            setError(messageFromError(saveError));
+          });
+        };
+        utterance.onend = () => {
+          releaseBrowserUtterance(utterance);
+
+          if (speechSessionRef.current !== session) {
+            return;
+          }
+
+          const queuedAnother = enqueueNext();
+
+          if (!queuedAnother && segmentIndex === sentences.length - 1) {
+            setIsSpeaking(false);
+          }
+        };
+        utterance.onerror = () => {
+          releaseBrowserUtterance(utterance);
+
+          if (speechSessionRef.current !== session) {
+            return;
+          }
+
+          speechSessionRef.current += 1;
+          window.speechSynthesis.cancel();
+          browserUtterancesRef.current = [];
+          setIsSpeaking(false);
+          setError("Mandarin voice playback failed.");
+        };
+
+        window.speechSynthesis.speak(utterance);
+        return true;
+      };
+
+      try {
+        enqueueNext();
+        enqueueNext();
+      } catch (speechError) {
+        speechSessionRef.current += 1;
+        window.speechSynthesis?.cancel();
+        browserUtterancesRef.current = [];
+        setIsSpeaking(false);
+        setError(messageFromError(speechError));
+      }
+    },
+    [browserUtterance, releaseBrowserUtterance, saveProgress],
+  );
 
   const playElevenLabsAudio = useCallback(
     async (text: string, session: number) => {
@@ -1082,8 +1237,14 @@ export function ReaderApp() {
       speechSessionRef.current = session;
       cleanupAudio();
       window.speechSynthesis.cancel();
+      browserUtterancesRef.current = [];
       setIsSpeaking(true);
       setError(null);
+
+      if (speechLanguage === "zh-CN") {
+        speakMandarinFrom(startIndex, session);
+        return;
+      }
 
       const speakAt = async (index: number) => {
         if (speechSessionRef.current !== session) {
@@ -1113,7 +1274,7 @@ export function ReaderApp() {
             `${messageFromError(playbackError)} Falling back to browser voice.`,
           );
           try {
-            speakWithBrowser(segment.text, () =>
+            speakWithBrowser(segment.text, undefined, () =>
               window.setTimeout(() => void speakAt(index + 1), 80),
             );
           } catch (fallbackError) {
@@ -1125,13 +1286,21 @@ export function ReaderApp() {
 
       void speakAt(startIndex);
     },
-    [cleanupAudio, playElevenLabsAudio, saveProgress, speakWithBrowser],
+    [
+      cleanupAudio,
+      playElevenLabsAudio,
+      saveProgress,
+      speakMandarinFrom,
+      speakWithBrowser,
+      speechLanguage,
+    ],
   );
 
   const stopSpeaking = useCallback(() => {
     speechSessionRef.current += 1;
     cleanupAudio();
     window.speechSynthesis?.cancel();
+    browserUtterancesRef.current = [];
     setIsSpeaking(false);
   }, [cleanupAudio]);
 
@@ -2856,6 +3025,7 @@ export function ReaderApp() {
                 <article
                   ref={articleBodyRef}
                   className="article-body"
+                  lang={speechLanguage}
                   onContextMenu={handleSentenceContextMenu}
                   onPointerUp={captureArticleSelection}
                   onKeyUp={captureArticleSelection}
