@@ -168,6 +168,90 @@ test("stores a complete narration after high-accuracy QA without the mini diagno
   assert.equal(calls.filter(([kind]) => kind === "update").length, 1);
 });
 
+test("accepts a strict mini QA pass when the primary transcript has homophone errors", async () => {
+  const article = pilotArticleFixture();
+  const calls = [];
+  const complete = canonicalNarrationSource(article.title, pilotBody);
+  const primaryWithHomophones = complete
+    .replaceAll("慈眉掩善光", "慈眉眼善光")
+    .replaceAll("善目遮锋芒", "善目遮风芒");
+  const result = await generatePilotArticleNarration(
+    article.id,
+    "cmsflash99@gmail.com",
+    {
+      articleRepository: {
+        async findById() {
+          return article;
+        },
+        async addProcessingCost() {
+          throw new Error("accepted audio uses the atomic narration cost write");
+        },
+        async updateNarration(id, ownerEmail, narration, costUsd, onlyIfEmpty) {
+          calls.push(["update", id, ownerEmail, costUsd, onlyIfEmpty]);
+          return { ...article, narration, processingCostUsd: costUsd };
+        },
+      },
+      artifactStorage: narrationStorage(calls),
+      fetch: narrationFetch(calls, {
+        primaryTranscript: primaryWithHomophones,
+        diagnosticTranscript: complete,
+      }),
+      apiKey: "test-key",
+      durationSecondsForAudio: () => 150,
+    },
+  );
+
+  assert.equal(result.qa.ok, true);
+  assert.deepEqual(
+    calls.filter(([kind]) => kind === "transcribe").map(([, model]) => model),
+    ["gpt-transcribe", "gpt-4o-mini-transcribe"],
+  );
+  assert.equal(calls.filter(([kind]) => kind === "put").length, 1);
+  assert.equal(calls.filter(([kind]) => kind === "cost").length, 0);
+  assert.equal(calls.filter(([kind]) => kind === "update").length, 1);
+});
+
+test("does not let a mini pass hide quote-marker speech in the primary transcript", async () => {
+  const article = pilotArticleFixture();
+  const calls = [];
+  const complete = canonicalNarrationSource(article.title, pilotBody);
+
+  await assert.rejects(
+    generatePilotArticleNarration(article.id, "cmsflash99@gmail.com", {
+      articleRepository: {
+        async findById() {
+          return article;
+        },
+        async addProcessingCost(id, ownerEmail, costUsd) {
+          calls.push(["cost", id, ownerEmail, costUsd]);
+          return { ...article, processingCostUsd: costUsd };
+        },
+        async updateNarration() {
+          throw new Error("unsafe audio must not attach");
+        },
+      },
+      artifactStorage: narrationStorage(calls),
+      fetch: narrationFetch(calls, {
+        primaryTranscript: `${complete} right handed quotation mark`,
+        diagnosticTranscript: complete,
+      }),
+      apiKey: "test-key",
+      durationSecondsForAudio: () => 150,
+    }),
+    (error) => {
+      assert.ok(error instanceof PilotNarrationError);
+      assert.equal(error.status, 422);
+      assert.ok(error.details.qa.forbiddenQuoteMarkers.includes("quotation"));
+      assert.equal(error.details.diagnosticQa.ok, true);
+      assert.match(error.details.candidateArtifactKey, /\/audio\/candidates\//u);
+      return true;
+    },
+  );
+
+  assert.equal(calls.filter(([kind]) => kind === "update").length, 0);
+  assert.equal(calls.filter(([kind]) => kind === "cost").length, 1);
+});
+
 test("retains and accounts for a rejected candidate with two transcript reports", async () => {
   const article = pilotArticleFixture();
   const calls = [];

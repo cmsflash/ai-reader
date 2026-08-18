@@ -177,7 +177,8 @@ export async function generatePilotArticleNarration(
     fetcher,
     transcriptModel,
   );
-  const qa = evaluateNarrationTranscript(canonicalSource, transcript);
+  let qa = evaluateNarrationTranscript(canonicalSource, transcript);
+  let usedDiagnosticTranscript = false;
 
   if (!qa.ok) {
     const diagnosticTranscript = await transcribeAudio(
@@ -189,62 +190,68 @@ export async function generatePilotArticleNarration(
     const diagnosticQa = diagnosticTranscript
       ? evaluateNarrationTranscript(canonicalSource, diagnosticTranscript)
       : null;
-    const candidateKey = narrationArtifactKey(
-      article.id,
-      sourceTextSha256,
-      true,
-    );
-    const candidate = await dependencies.artifactStorage
-      .put({
-        key: candidateKey,
-        body: audio,
-        contentType: "audio/mpeg",
-        visibility: "public",
-      })
-      .catch(() => null);
-    const estimatedCostUsd = estimatedPilotCostUsd(
-      narrationInput,
-      durationSeconds,
-      true,
-    );
-    const costRecorded = await dependencies.articleRepository
-      .addProcessingCost(article.id, ownerEmail, estimatedCostUsd)
-      .then(Boolean)
-      .catch(() => false);
 
-    throw new PilotNarrationError(
-      "Generated narration did not pass coverage QA. " +
-        `High-accuracy transcript: ${qa.failures.join("; ")}. ` +
-        `Mini transcript diagnostic: ${
-          diagnosticQa
-            ? diagnosticQa.ok
-              ? "passed"
-              : diagnosticQa.failures.join("; ")
-            : "unavailable"
-        }`,
-      422,
-      {
-        byteLength: audio.byteLength,
-        durationSeconds: round(durationSeconds, 3),
-        transcript,
-        transcriptTail: lastCharacters(transcript, 120),
-        qa,
-        diagnosticTranscript,
-        diagnosticTranscriptTail: diagnosticTranscript
-          ? lastCharacters(diagnosticTranscript, 120)
-          : null,
-        diagnosticQa,
-        candidateArtifactKey: candidate?.key ?? null,
-        candidateAudioPath: candidate
-          ? `/api/artifacts/${candidate.key
-              .split("/")
-              .map(encodeURIComponent)
-              .join("/")}`
-          : null,
-        estimatedCostUsd,
-        costRecorded,
-      },
-    );
+    if (diagnosticQa?.ok && primaryQaAllowsDiagnosticOverride(qa)) {
+      qa = diagnosticQa;
+      usedDiagnosticTranscript = true;
+    } else {
+      const candidateKey = narrationArtifactKey(
+        article.id,
+        sourceTextSha256,
+        true,
+      );
+      const candidate = await dependencies.artifactStorage
+        .put({
+          key: candidateKey,
+          body: audio,
+          contentType: "audio/mpeg",
+          visibility: "public",
+        })
+        .catch(() => null);
+      const estimatedCostUsd = estimatedPilotCostUsd(
+        narrationInput,
+        durationSeconds,
+        true,
+      );
+      const costRecorded = await dependencies.articleRepository
+        .addProcessingCost(article.id, ownerEmail, estimatedCostUsd)
+        .then(Boolean)
+        .catch(() => false);
+
+      throw new PilotNarrationError(
+        "Generated narration did not pass coverage QA. " +
+          `High-accuracy transcript: ${qa.failures.join("; ")}. ` +
+          `Mini transcript diagnostic: ${
+            diagnosticQa
+              ? diagnosticQa.ok
+                ? "passed"
+                : diagnosticQa.failures.join("; ")
+              : "unavailable"
+          }`,
+        422,
+        {
+          byteLength: audio.byteLength,
+          durationSeconds: round(durationSeconds, 3),
+          transcript,
+          transcriptTail: lastCharacters(transcript, 120),
+          qa,
+          diagnosticTranscript,
+          diagnosticTranscriptTail: diagnosticTranscript
+            ? lastCharacters(diagnosticTranscript, 120)
+            : null,
+          diagnosticQa,
+          candidateArtifactKey: candidate?.key ?? null,
+          candidateAudioPath: candidate
+            ? `/api/artifacts/${candidate.key
+                .split("/")
+                .map(encodeURIComponent)
+                .join("/")}`
+            : null,
+          estimatedCostUsd,
+          costRecorded,
+        },
+      );
+    }
   }
 
   const artifactKey = narrationArtifactKey(article.id, sourceTextSha256, false);
@@ -268,7 +275,7 @@ export async function generatePilotArticleNarration(
   const estimatedCostUsd = estimatedPilotCostUsd(
     narrationInput,
     durationSeconds,
-    false,
+    usedDiagnosticTranscript,
   );
   let updated: Article | null;
 
@@ -504,6 +511,15 @@ function round(value: number, digits: number) {
 
 function lastCharacters(value: string, count: number) {
   return Array.from(value).slice(-count).join("");
+}
+
+function primaryQaAllowsDiagnosticOverride(qa: ArticleNarrationQa) {
+  return (
+    qa.characterErrorRate <= 0.08 &&
+    qa.orderedCoverage >= 0.95 &&
+    qa.maxContiguousSourceDeletion <= 4 &&
+    qa.forbiddenQuoteMarkers.length === 0
+  );
 }
 
 function narrationArtifactKey(
