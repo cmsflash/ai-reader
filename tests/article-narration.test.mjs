@@ -45,9 +45,32 @@ const { getSavedArticleNarrationArtifact } = await import(
 const { articleNarrationResponse } = await import(
   "../src/server/articles/articleNarrationResponse.ts"
 );
-const { mp3DurationSeconds, verifyPilotNarrationModelAccess } = await import(
-  "../src/server/articles/articleNarrationPilot.ts"
+const {
+  generatePilotArticleNarration,
+  mp3DurationSeconds,
+  PilotNarrationError,
+  verifyPilotNarrationModelAccess,
+} = await import("../src/server/articles/articleNarrationPilot.ts");
+const { canonicalNarrationSource } = await import(
+  "../src/server/articles/articleNarrationQa.ts"
 );
+
+const pilotBody = [
+  "慈眉掩善光，善目遮锋芒。",
+  "妙法助英豪，良心因果长。",
+  "天规载，土地公有察点本坊生灵，保育此地水土的职责。",
+  "这日，黑风山土地公依例在山中巡视俗务，正见有位老道士自远处而来。他穿一领星辰点就的道袍，挎一个青藤编就的药篮，手里敲着渔鼓，嘴里唱着月高，三两步飘摇到了近前。",
+  "土地公仔细打量，认定不曾相识，但凭那鹤发童颜，星目含威的气度，便知不是凡人，赶紧道了个问讯：“老道长，小仙起手了。”",
+  "老道士微微颔首，将自己的药篮递了过去。土地公一瞧，篮中俱是些珍奇事物，灵丹妙药，不由心惊，问道：“小仙如何受得起这般厚礼？”",
+  "那道士笑道：“我原是路过此地，但料想此后不久，这山中有场大动荡，想这篮中之物，必能帮你熬上一阵，便来拜访了。”",
+  "“道长何出此言？”",
+  "“我有个故人，性子不良，如今虽积下些功业，但依着他那倨傲的本心，准是难以安生，总怕他再闯些烧身大祸来……”",
+  "土地公细细寻思，诚然道：“小仙能帮些什么？” 老道士见他有些乖觉，招手让他上前，附耳传了他几门保命的法术，并嘱咐道：“若你在山中遇着他，可将此两法相传。我不便出面，只能借你手，教他一二，全了一场情义。”",
+  "土地公感激不已，作揖深谢，那老道士还了一礼，就要乘云而去，土地公急急追问：“敢问道长，仙居何处？”",
+  "那道士早已踏着祥云远去，天上飘下一片叶子，香味清远，叶尖极细极长。土地公似有所悟，赶紧朝着远处行礼作揖，直至云烟都不见了，方才离去。",
+  "慈眉掩善光，善目遮锋芒。",
+  "妙法助英豪，良心因果长。",
+].join("\n\n");
 
 test("checks the pinned narration model without generating audio", async () => {
   const requests = [];
@@ -58,16 +81,23 @@ test("checks the pinned narration model without generating audio", async () => {
       apiKey: "test-openai-key",
       async fetch(url, init) {
         requests.push({ url, init });
-        return Response.json({ id: "gpt-4o-mini-tts-2025-12-15" });
+        return Response.json({ id: url.split("/").at(-1) });
       },
     },
   );
 
   assert.equal(result.model, "gpt-4o-mini-tts-2025-12-15");
-  assert.equal(requests.length, 1);
+  assert.equal(result.transcriptModel, "gpt-transcribe");
+  assert.equal(requests.length, 2);
   assert.match(requests[0].url, /\/models\/gpt-4o-mini-tts-2025-12-15$/u);
-  assert.equal(requests[0].init.headers.authorization, "Bearer test-openai-key");
-  assert.equal(requests[0].init.method, undefined);
+  assert.match(requests[1].url, /\/models\/gpt-transcribe$/u);
+  assert.ok(
+    requests.every(
+      (request) =>
+        request.init.headers.authorization === "Bearer test-openai-key" &&
+        request.init.method === undefined,
+    ),
+  );
 });
 
 test("model access check rejects every non-pilot owner before an API call", async () => {
@@ -95,6 +125,128 @@ test("reads duration from the generated MP3 frame bitrate", () => {
   audio.writeUInt32BE(0xfffb9000, 0);
 
   assert.equal(mp3DurationSeconds(audio), 150);
+});
+
+test("stores a complete narration after high-accuracy QA without the mini diagnostic", async () => {
+  const article = pilotArticleFixture();
+  const calls = [];
+  const result = await generatePilotArticleNarration(
+    article.id,
+    "cmsflash99@gmail.com",
+    {
+      articleRepository: {
+        async findById() {
+          return article;
+        },
+        async addProcessingCost() {
+          throw new Error("diagnostic cost should not be recorded on success");
+        },
+        async updateNarration(id, ownerEmail, narration, costUsd, onlyIfEmpty) {
+          calls.push(["update", id, ownerEmail, costUsd, onlyIfEmpty]);
+          return { ...article, narration, processingCostUsd: costUsd };
+        },
+      },
+      artifactStorage: narrationStorage(calls),
+      fetch: narrationFetch(calls, {
+        primaryTranscript: canonicalNarrationSource(article.title, pilotBody),
+      }),
+      apiKey: "test-key",
+      durationSecondsForAudio: () => 150,
+    },
+  );
+
+  assert.equal(result.alreadyExisted, false);
+  assert.equal(result.qa.ok, true);
+  assert.match(result.narration.artifactKey, /\/audio\//u);
+  assert.doesNotMatch(result.narration.artifactKey, /\/candidates\//u);
+  assert.deepEqual(
+    calls.filter(([kind]) => kind === "transcribe").map(([, model]) => model),
+    ["gpt-transcribe"],
+  );
+  assert.equal(calls.filter(([kind]) => kind === "put").length, 1);
+  assert.equal(calls.filter(([kind]) => kind === "delete").length, 0);
+  assert.equal(calls.filter(([kind]) => kind === "update").length, 1);
+});
+
+test("retains and accounts for a rejected candidate with two transcript reports", async () => {
+  const article = pilotArticleFixture();
+  const calls = [];
+  const incomplete = canonicalNarrationSource(article.title, pilotBody)
+    .split("\n\n")
+    .slice(0, -2)
+    .join("\n\n");
+
+  await assert.rejects(
+    generatePilotArticleNarration(article.id, "cmsflash99@gmail.com", {
+      articleRepository: {
+        async findById() {
+          return article;
+        },
+        async addProcessingCost(id, ownerEmail, costUsd) {
+          calls.push(["cost", id, ownerEmail, costUsd]);
+          return { ...article, processingCostUsd: costUsd };
+        },
+        async updateNarration() {
+          throw new Error("a rejected candidate must not attach");
+        },
+      },
+      artifactStorage: narrationStorage(calls),
+      fetch: narrationFetch(calls, {
+        primaryTranscript: incomplete,
+        diagnosticTranscript: incomplete,
+      }),
+      apiKey: "test-key",
+      durationSecondsForAudio: () => 150,
+    }),
+    (error) => {
+      assert.ok(error instanceof PilotNarrationError);
+      assert.equal(error.status, 422);
+      assert.equal(error.details.costRecorded, true);
+      assert.match(error.details.candidateArtifactKey, /\/audio\/candidates\//u);
+      assert.match(error.details.candidateAudioPath, /^\/api\/artifacts\//u);
+      assert.equal(error.details.qa.ok, false);
+      assert.equal(error.details.diagnosticQa.ok, false);
+      return true;
+    },
+  );
+
+  assert.deepEqual(
+    calls.filter(([kind]) => kind === "transcribe").map(([, model]) => model),
+    ["gpt-transcribe", "gpt-4o-mini-transcribe"],
+  );
+  assert.equal(calls.filter(([kind]) => kind === "cost").length, 1);
+  assert.equal(calls.filter(([kind]) => kind === "put").length, 1);
+});
+
+test("deletes generated audio when the narration database write throws", async () => {
+  const article = pilotArticleFixture();
+  const calls = [];
+
+  await assert.rejects(
+    generatePilotArticleNarration(article.id, "cmsflash99@gmail.com", {
+      articleRepository: {
+        async findById() {
+          return article;
+        },
+        async addProcessingCost() {
+          return article;
+        },
+        async updateNarration() {
+          throw new Error("database unavailable");
+        },
+      },
+      artifactStorage: narrationStorage(calls),
+      fetch: narrationFetch(calls, {
+        primaryTranscript: canonicalNarrationSource(article.title, pilotBody),
+      }),
+      apiKey: "test-key",
+      durationSecondsForAudio: () => 150,
+    }),
+    (error) => error instanceof PilotNarrationError && error.status === 500,
+  );
+
+  assert.equal(calls.filter(([kind]) => kind === "put").length, 1);
+  assert.equal(calls.filter(([kind]) => kind === "delete").length, 1);
 });
 
 test("loads narration only after an owner-scoped article lookup succeeds", async () => {
@@ -252,6 +404,59 @@ function articleFixture() {
       voice: "cedar",
       generatedAt: timestamp,
     },
+  };
+}
+
+function pilotArticleFixture() {
+  return {
+    id: "black-myth-journal-5df74e22bc38174a8a99c9b2",
+    title: "黑风山土地",
+    textContent: pilotBody,
+    processingCostUsd: 0,
+  };
+}
+
+function narrationStorage(calls) {
+  return {
+    async put(input) {
+      calls.push(["put", input.key]);
+      return {
+        key: input.key,
+        contentType: input.contentType,
+        byteLength: input.body.byteLength,
+      };
+    },
+    async delete(key) {
+      calls.push(["delete", key]);
+    },
+  };
+}
+
+function narrationFetch(calls, transcripts) {
+  const audio = Buffer.alloc(16_000);
+  audio.writeUInt32BE(0xfffb9000, 0);
+
+  return async (url, init) => {
+    if (url.endsWith("/audio/speech")) {
+      const request = JSON.parse(init.body);
+      calls.push(["speech", request]);
+      assert.match(request.instructions, /即使内容重复/u);
+      return new Response(new Uint8Array(audio), {
+        headers: { "content-type": "audio/mpeg" },
+      });
+    }
+
+    if (url.endsWith("/audio/transcriptions")) {
+      const model = init.body.get("model");
+      calls.push(["transcribe", model]);
+      const text =
+        model === "gpt-transcribe"
+          ? transcripts.primaryTranscript
+          : transcripts.diagnosticTranscript ?? transcripts.primaryTranscript;
+      return Response.json({ text });
+    }
+
+    throw new Error(`Unexpected narration request: ${url}`);
   };
 }
 

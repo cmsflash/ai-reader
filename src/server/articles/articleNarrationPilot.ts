@@ -19,14 +19,15 @@ export const pilotNarrationTarget = {
 } as const;
 
 const speechModel = "gpt-4o-mini-tts-2025-12-15";
-const transcriptModel = "gpt-4o-mini-transcribe";
+const transcriptModel = "gpt-transcribe";
+const diagnosticTranscriptModel = "gpt-4o-mini-transcribe";
 const voice = "cedar";
 const openAiBaseUrl = "https://api.openai.com/v1";
 
 type PilotNarrationDependencies = {
   articleRepository: Pick<
     ArticleRepository,
-    "findById" | "updateNarration"
+    "addProcessingCost" | "findById" | "updateNarration"
   >;
   artifactStorage: Pick<ArtifactStorage, "put" | "delete">;
   apiKey?: string;
@@ -44,11 +45,17 @@ export type PilotNarrationResult = {
 
 export class PilotNarrationError extends Error {
   readonly status: number;
+  readonly details?: Record<string, unknown>;
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    details?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = "PilotNarrationError";
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -74,19 +81,27 @@ export async function verifyPilotNarrationModelAccess(
     throw new PilotNarrationError("OpenAI narration is not configured.", 503);
   }
 
-  const response = await fetcher(
-    `${openAiBaseUrl}/models/${encodeURIComponent(speechModel)}`,
-    { headers: { authorization: `Bearer ${apiKey}` } },
+  const models = [speechModel, transcriptModel];
+  const responses = await Promise.all(
+    models.map((model) =>
+      fetcher(`${openAiBaseUrl}/models/${encodeURIComponent(model)}`, {
+        headers: { authorization: `Bearer ${apiKey}` },
+      }),
+    ),
   );
+  const failedIndex = responses.findIndex((response) => !response.ok);
 
-  if (!response.ok) {
+  if (failedIndex >= 0) {
     throw new PilotNarrationError(
-      `OpenAI narration access check failed (${response.status}).`,
+      `OpenAI narration access check failed for ${models[failedIndex]} (${responses[failedIndex].status}).`,
       502,
     );
   }
 
-  return { model: speechModel };
+  return {
+    model: speechModel,
+    transcriptModel,
+  };
 }
 
 export async function generatePilotArticleNarration(
@@ -137,7 +152,9 @@ export async function generatePilotArticleNarration(
     article.title,
     article.textContent,
   );
-  const narrationInput = normalizeNarrationInput(canonicalSource);
+  const narrationInput = normalizeNarrationInput(
+    `${article.title.trim()}。\n\n${article.textContent.trim()}`,
+  );
   const sourceTextSha256 = narrationSourceSha256(
     article.title,
     article.textContent,
@@ -154,20 +171,83 @@ export async function generatePilotArticleNarration(
         mp3DurationSeconds(audio),
     ) ?? estimatedDurationFromText(narrationInput);
 
-  const transcript = await transcribeAudio(audio, apiKey, fetcher);
+  const transcript = await transcribeAudio(
+    audio,
+    apiKey,
+    fetcher,
+    transcriptModel,
+  );
   const qa = evaluateNarrationTranscript(canonicalSource, transcript);
 
   if (!qa.ok) {
+    const diagnosticTranscript = await transcribeAudio(
+      audio,
+      apiKey,
+      fetcher,
+      diagnosticTranscriptModel,
+    ).catch(() => null);
+    const diagnosticQa = diagnosticTranscript
+      ? evaluateNarrationTranscript(canonicalSource, diagnosticTranscript)
+      : null;
+    const candidateKey = narrationArtifactKey(
+      article.id,
+      sourceTextSha256,
+      true,
+    );
+    const candidate = await dependencies.artifactStorage
+      .put({
+        key: candidateKey,
+        body: audio,
+        contentType: "audio/mpeg",
+        visibility: "public",
+      })
+      .catch(() => null);
+    const estimatedCostUsd = estimatedPilotCostUsd(
+      narrationInput,
+      durationSeconds,
+      true,
+    );
+    const costRecorded = await dependencies.articleRepository
+      .addProcessingCost(article.id, ownerEmail, estimatedCostUsd)
+      .then(Boolean)
+      .catch(() => false);
+
     throw new PilotNarrationError(
-      `Generated narration did not pass coverage QA: ${qa.failures.join("; ")}`,
+      "Generated narration did not pass coverage QA. " +
+        `High-accuracy transcript: ${qa.failures.join("; ")}. ` +
+        `Mini transcript diagnostic: ${
+          diagnosticQa
+            ? diagnosticQa.ok
+              ? "passed"
+              : diagnosticQa.failures.join("; ")
+            : "unavailable"
+        }`,
       422,
+      {
+        byteLength: audio.byteLength,
+        durationSeconds: round(durationSeconds, 3),
+        transcript,
+        transcriptTail: lastCharacters(transcript, 120),
+        qa,
+        diagnosticTranscript,
+        diagnosticTranscriptTail: diagnosticTranscript
+          ? lastCharacters(diagnosticTranscript, 120)
+          : null,
+        diagnosticQa,
+        candidateArtifactKey: candidate?.key ?? null,
+        candidateAudioPath: candidate
+          ? `/api/artifacts/${candidate.key
+              .split("/")
+              .map(encodeURIComponent)
+              .join("/")}`
+          : null,
+        estimatedCostUsd,
+        costRecorded,
+      },
     );
   }
 
-  const safeModel = speechModel.replace(/[^a-z0-9.-]+/giu, "-");
-  const artifactKey =
-    `articles/${article.id}/audio/` +
-    `${sourceTextSha256}-${safeModel}-${voice}-${randomUUID()}.mp3`;
+  const artifactKey = narrationArtifactKey(article.id, sourceTextSha256, false);
   const stored = await dependencies.artifactStorage.put({
     key: artifactKey,
     body: audio,
@@ -188,18 +268,40 @@ export async function generatePilotArticleNarration(
   const estimatedCostUsd = estimatedPilotCostUsd(
     narrationInput,
     durationSeconds,
+    false,
   );
-  const updated = await dependencies.articleRepository.updateNarration(
-    article.id,
-    ownerEmail,
-    narration,
-    estimatedCostUsd,
-    true,
-  );
+  let updated: Article | null;
+
+  try {
+    updated = await dependencies.articleRepository.updateNarration(
+      article.id,
+      ownerEmail,
+      narration,
+      estimatedCostUsd,
+      true,
+    );
+  } catch {
+    const cleanedUp = await deleteArtifactQuietly(
+      dependencies.artifactStorage,
+      stored.key,
+    );
+    throw new PilotNarrationError(
+      "Could not attach narration to the article.",
+      500,
+      cleanedUp ? undefined : { orphanedArtifactKey: stored.key },
+    );
+  }
 
   if (!updated) {
-    await dependencies.artifactStorage.delete(stored.key);
-    throw new PilotNarrationError("Could not attach narration to the article.", 500);
+    const cleanedUp = await deleteArtifactQuietly(
+      dependencies.artifactStorage,
+      stored.key,
+    );
+    throw new PilotNarrationError(
+      "Could not attach narration to the article.",
+      500,
+      cleanedUp ? undefined : { orphanedArtifactKey: stored.key },
+    );
   }
 
   return {
@@ -227,7 +329,7 @@ async function createSpeech(
       voice,
       input,
       instructions:
-        "请用自然、清晰的中国大陆普通话，以沉稳温暖的有声书叙事风格朗读。逐字完整朗读每一句，不得增删、跳过或改写内容；标点和引号只用于停顿与区分对话，绝对不要念出任何标点或引号名称；段落之间自然停顿；对白与叙述略作区分，但不要夸张表演。",
+        "最高优先级是忠实完整。只朗读输入内容，从第一个字按原顺序读到最后一个字才停止；不得概括、合并、改写、补字或漏字。即使内容重复，也必须在每次出现时完整朗读。标题和正文都要读。正文末尾两段诗句有意重复开头两段，必须再次逐字完整朗读，读完最后一个“长”字才结束。标点只控制停顿并区分对话，绝不念出标点或引号名称。请使用自然、清晰的中国大陆普通话和沉稳温暖的有声书语气；准确完整高于表演，不要添加开场白或结语。",
       response_format: "mp3",
       speed: 1,
     }),
@@ -247,6 +349,7 @@ async function transcribeAudio(
   audio: Buffer,
   apiKey: string,
   fetcher: typeof globalThis.fetch,
+  model: string,
 ) {
   const form = new FormData();
   form.set(
@@ -254,7 +357,7 @@ async function transcribeAudio(
     new Blob([new Uint8Array(audio)], { type: "audio/mpeg" }),
     "narration.mp3",
   );
-  form.set("model", transcriptModel);
+  form.set("model", model);
   form.set("language", "zh");
   form.set("response_format", "json");
   form.set(
@@ -367,12 +470,17 @@ function id3v2ByteLength(audio: Buffer) {
   return Math.min(size + 10, audio.byteLength);
 }
 
-function estimatedPilotCostUsd(input: string, durationSeconds: number) {
+function estimatedPilotCostUsd(
+  input: string,
+  durationSeconds: number,
+  includeDiagnosticTranscript: boolean,
+) {
   const estimatedInputTokens = Math.ceil(Array.from(input).length * 1.1);
   const speechInputCost = (estimatedInputTokens / 1_000_000) * 0.6;
   const audioMinutes = durationSeconds / 60;
   const speechAudioCost = audioMinutes * 0.015;
-  const transcriptionCost = audioMinutes * 0.003;
+  const transcriptionCost =
+    audioMinutes * (0.0045 + (includeDiagnosticTranscript ? 0.003 : 0));
   return round(speechInputCost + speechAudioCost + transcriptionCost, 6);
 }
 
@@ -392,4 +500,33 @@ async function safeResponseError(response: Response) {
 function round(value: number, digits: number) {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
+}
+
+function lastCharacters(value: string, count: number) {
+  return Array.from(value).slice(-count).join("");
+}
+
+function narrationArtifactKey(
+  articleId: string,
+  sourceTextSha256: string,
+  candidate: boolean,
+) {
+  const safeModel = speechModel.replace(/[^a-z0-9.-]+/giu, "-");
+  const directory = candidate ? "audio/candidates" : "audio";
+  return (
+    `articles/${articleId}/${directory}/` +
+    `${sourceTextSha256}-${safeModel}-${voice}-${randomUUID()}.mp3`
+  );
+}
+
+async function deleteArtifactQuietly(
+  artifactStorage: Pick<ArtifactStorage, "delete">,
+  key: string,
+) {
+  try {
+    await artifactStorage.delete(key);
+    return true;
+  } catch {
+    return false;
+  }
 }

@@ -32,7 +32,11 @@ export async function GET(_request: Request, context: RouteContext) {
     );
 
     return NextResponse.json(
-      { ok: true, model: result.model },
+      {
+        ok: true,
+        model: result.model,
+        transcriptModel: result.transcriptModel,
+      },
       { headers: { "cache-control": "no-store" } },
     );
   } catch (error) {
@@ -80,6 +84,9 @@ function narrationErrorResponse(error: unknown) {
         error instanceof PilotNarrationError
           ? error.message
           : "Could not generate article narration.",
+      ...(error instanceof PilotNarrationError && error.details
+        ? { details: error.details }
+        : {}),
     },
     { status, headers: { "cache-control": "no-store" } },
   );
