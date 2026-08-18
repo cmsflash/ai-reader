@@ -1823,18 +1823,9 @@ export function ReaderApp() {
     setIsImporting(true);
     const pendingImport = pendingImportFromUrl(url.trim());
     setPendingImports((current) => [pendingImport, ...current]);
-    articleIdRef.current = pendingImport.id;
-    const currentDepth = appHistoryEntry(window.history.state)?.depth ?? 0;
-    writeAppHistory("replace", {
-      view: "reader",
-      articleId: pendingImport.id,
-      depth: currentDepth,
-    });
-    setSelectedId(pendingImport.id);
-    setAppView("reader");
-    setArticle(null);
     setStatus("Parsing URL...");
     setError(null);
+    showLibrary();
 
     try {
       const data = await requestJson<ImportResponse>("/api/articles", {
@@ -1908,18 +1899,9 @@ export function ReaderApp() {
     const pendingImport = pendingImportFromFile(file);
     setIsImporting(true);
     setPendingImports((current) => [pendingImport, ...current]);
-    articleIdRef.current = pendingImport.id;
-    const currentDepth = appHistoryEntry(window.history.state)?.depth ?? 0;
-    writeAppHistory("replace", {
-      view: "reader",
-      articleId: pendingImport.id,
-      depth: currentDepth,
-    });
-    setSelectedId(pendingImport.id);
-    setAppView("reader");
-    setArticle(null);
     setStatus(`Parsing ${file.name}...`);
     setError(null);
+    showLibrary();
 
     try {
       const data = await requestJson<ImportResponse>("/api/articles", {
