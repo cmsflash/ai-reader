@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   articleNarrationAudioUrl,
+  normalizedNarrationSegments,
+  narrationSegmentAtTime,
   narrationProgressForSentenceIndex,
   matchingNarrationCues,
   narrationSentenceMapFingerprint,
@@ -15,6 +17,66 @@ test("builds an owner-checked article narration URL", () => {
   assert.equal(
     articleNarrationAudioUrl("article/with spaces"),
     "/api/articles/article%2Fwith%20spaces/audio",
+  );
+  assert.equal(
+    articleNarrationAudioUrl("article/with spaces", 3),
+    "/api/articles/article%2Fwith%20spaces/audio?segment=3",
+  );
+});
+
+test("validates narration segment packages and maps global time", () => {
+  const narration = {
+    artifactKey: "audio/0.mp3",
+    artifactVisibility: "public",
+    contentType: "audio/mpeg",
+    byteLength: 10,
+    durationSeconds: 12,
+    segments: [
+      {
+        index: 0,
+        artifactKey: "audio/0.mp3",
+        artifactVisibility: "public",
+        contentType: "audio/mpeg",
+        byteLength: 10,
+        startSeconds: 0,
+        durationSeconds: 5,
+        inputSha256: "a".repeat(64),
+      },
+      {
+        index: 1,
+        artifactKey: "audio/1.mp3",
+        artifactVisibility: "public",
+        contentType: "audio/mpeg",
+        byteLength: 12,
+        startSeconds: 5,
+        durationSeconds: 7,
+        inputSha256: "b".repeat(64),
+      },
+    ],
+  };
+  const segments = normalizedNarrationSegments(narration);
+
+  assert.equal(segments?.length, 2);
+  assert.deepEqual(narrationSegmentAtTime(segments, 0), {
+    segment: segments[0],
+    localTime: 0,
+  });
+  assert.deepEqual(narrationSegmentAtTime(segments, 6.5), {
+    segment: segments[1],
+    localTime: 1.5,
+  });
+  assert.deepEqual(narrationSegmentAtTime(segments, 99), {
+    segment: segments[1],
+    localTime: 7,
+  });
+  assert.equal(
+    normalizedNarrationSegments({
+      ...narration,
+      segments: narration.segments.map((segment, index) =>
+        index === 1 ? { ...segment, startSeconds: 4 } : segment,
+      ),
+    }),
+    undefined,
   );
 });
 

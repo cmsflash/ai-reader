@@ -136,10 +136,113 @@ export async function backfillArticleContentFingerprints(
 }
 
 export function splitStatements(sqlText) {
-  return sqlText
-    .split(";")
-    .map((statement) => statement.trim())
-    .filter(Boolean);
+  const statements = [];
+  let statementStart = 0;
+  let singleQuoted = false;
+  let doubleQuoted = false;
+  let lineComment = false;
+  let blockCommentDepth = 0;
+  let dollarQuote = null;
+
+  for (let index = 0; index < sqlText.length; index += 1) {
+    const character = sqlText[index];
+    const next = sqlText[index + 1];
+
+    if (lineComment) {
+      if (character === "\n") {
+        lineComment = false;
+      }
+      continue;
+    }
+
+    if (blockCommentDepth > 0) {
+      if (character === "/" && next === "*") {
+        blockCommentDepth += 1;
+        index += 1;
+      } else if (character === "*" && next === "/") {
+        blockCommentDepth -= 1;
+        index += 1;
+      }
+      continue;
+    }
+
+    if (dollarQuote) {
+      if (sqlText.startsWith(dollarQuote, index)) {
+        index += dollarQuote.length - 1;
+        dollarQuote = null;
+      }
+      continue;
+    }
+
+    if (singleQuoted) {
+      if (character === "'" && next === "'") {
+        index += 1;
+      } else if (character === "'") {
+        singleQuoted = false;
+      }
+      continue;
+    }
+
+    if (doubleQuoted) {
+      if (character === '"' && next === '"') {
+        index += 1;
+      } else if (character === '"') {
+        doubleQuoted = false;
+      }
+      continue;
+    }
+
+    if (character === "-" && next === "-") {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+
+    if (character === "/" && next === "*") {
+      blockCommentDepth = 1;
+      index += 1;
+      continue;
+    }
+
+    if (character === "'") {
+      singleQuoted = true;
+      continue;
+    }
+
+    if (character === '"') {
+      doubleQuoted = true;
+      continue;
+    }
+
+    if (character === "$") {
+      const match = sqlText.slice(index).match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/u);
+
+      if (match) {
+        dollarQuote = match[0];
+        index += dollarQuote.length - 1;
+        continue;
+      }
+    }
+
+    if (character !== ";") {
+      continue;
+    }
+
+    const statement = sqlText.slice(statementStart, index).trim();
+
+    if (statement) {
+      statements.push(statement);
+    }
+    statementStart = index + 1;
+  }
+
+  const finalStatement = sqlText.slice(statementStart).trim();
+
+  if (finalStatement) {
+    statements.push(finalStatement);
+  }
+
+  return statements;
 }
 
 async function clearLegacyFingerprint(sql, row) {

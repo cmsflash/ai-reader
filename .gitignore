@@ -1,5 +1,6 @@
 node_modules
 .next
+.workflow-data/
 .vercel
 out
 build
@@ -10,7 +11,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-tsconfig.tsbuildinfo
+*.tsbuildinfo
 data/articles.json
 data/*.tmp
 data/artifacts/
+/.swc

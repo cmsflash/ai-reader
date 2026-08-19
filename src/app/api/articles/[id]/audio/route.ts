@@ -19,9 +19,27 @@ export async function GET(request: Request, context: RouteContext) {
   }
 
   const { id } = await context.params;
+  const segmentValue = new URL(request.url).searchParams.get("segment");
+  const segmentIndex =
+    segmentValue === null || segmentValue === ""
+      ? undefined
+      : Number(segmentValue);
+
+  if (
+    typeof segmentIndex === "number" &&
+    (!Number.isSafeInteger(segmentIndex) || segmentIndex < 0)
+  ) {
+    return NextResponse.json(
+      { error: "Invalid narration segment." },
+      { status: 400 },
+    );
+  }
+
   const result = await getSavedArticleNarrationArtifact(
     id,
     auth.user.ownerEmail,
+    {},
+    segmentIndex,
   );
 
   if (!result) {

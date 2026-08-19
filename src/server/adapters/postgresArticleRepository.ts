@@ -487,18 +487,38 @@ export class PostgresArticleRepository implements ArticleRepository {
     onlyIfEmpty = false,
   ) {
     const safeCost = clampNumber(costUsd, 0, Number.MAX_SAFE_INTEGER);
+    const generationFingerprint = narration?.generationFingerprint ?? null;
     const rows = await this.queryArticles(
       `
-        UPDATE articles
-        SET
-          updated_at = $2::timestamptz,
-          narration = $3::jsonb,
-          processing_cost_usd = ROUND((processing_cost_usd + $4::numeric), 6)
+        WITH updated AS (
+          UPDATE articles
+          SET
+            updated_at = $2::timestamptz,
+            narration = $3::jsonb,
+            processing_cost_usd = ROUND((processing_cost_usd + $4::numeric), 6)
+          WHERE
+            id = $1
+            AND owner_email = $5
+            AND (NOT $6::boolean OR narration IS NULL)
+            AND (
+              $7::text IS NULL
+              OR narration IS NULL
+              OR narration ->> 'generationFingerprint' IS DISTINCT FROM $7::text
+            )
+          RETURNING ${articleColumns}
+        )
+        SELECT ${articleColumns}
+        FROM updated
+        UNION ALL
+        SELECT ${articleColumns}
+        FROM articles
         WHERE
           id = $1
           AND owner_email = $5
-          AND (NOT $6::boolean OR narration IS NULL)
-        RETURNING ${articleColumns}
+          AND $7::text IS NOT NULL
+          AND narration ->> 'generationFingerprint' = $7::text
+          AND NOT EXISTS (SELECT 1 FROM updated)
+        LIMIT 1
       `,
       [
         id,
@@ -507,6 +527,7 @@ export class PostgresArticleRepository implements ArticleRepository {
         safeCost,
         normalizeOwnerEmail(ownerEmail),
         onlyIfEmpty,
+        generationFingerprint,
       ],
     );
 

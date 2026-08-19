@@ -61,7 +61,19 @@ export type ArticleNarrationAlignment = {
   sentenceCues: ArticleNarrationCue[];
 };
 
+export type ArticleNarrationSegment = {
+  index: number;
+  artifactKey: string;
+  artifactVisibility: "private" | "public";
+  contentType: string;
+  byteLength: number;
+  startSeconds: number;
+  durationSeconds: number;
+  inputSha256: string;
+};
+
 export type ArticleNarration = {
+  version?: 1 | 2;
   artifactKey: string;
   artifactVisibility: "private" | "public";
   contentType: string;
@@ -71,6 +83,10 @@ export type ArticleNarration = {
   voice: string;
   generatedAt: string;
   durationSeconds?: number;
+  generationFingerprint?: string;
+  language?: "zh-CN" | "en-US";
+  profileVersion?: number;
+  segments?: ArticleNarrationSegment[];
   alignment?: ArticleNarrationAlignment;
 };
 

@@ -59,7 +59,9 @@ import {
 import {
   articleNarrationAudioUrl,
   matchingNarrationCues,
+  normalizedNarrationSegments,
   narrationProgressForSentenceIndex,
+  narrationSegmentAtTime,
   narrationSentenceIndexAtProgress,
   narrationSentenceIndexAtTime,
   narrationTimeForSentenceIndex,
@@ -382,7 +384,9 @@ export function ReaderApp() {
   const restoredArticleIdRef = useRef<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+  const audioPlaybackCancelRef = useRef<(() => void) | null>(null);
   const activeNarrationArticleIdRef = useRef<string | null>(null);
+  const activeNarrationSegmentOffsetRef = useRef(0);
   const narrationResumeRef = useRef<{
     articleId: string;
     currentTime: number;
@@ -1022,6 +1026,9 @@ export function ReaderApp() {
   }, []);
 
   const cleanupAudio = useCallback(() => {
+    audioPlaybackCancelRef.current?.();
+    audioPlaybackCancelRef.current = null;
+
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.removeAttribute("src");
@@ -1246,15 +1253,26 @@ export function ReaderApp() {
       seekToSentence: boolean,
     ) => {
       cleanupAudio();
-      const audio = new Audio(articleNarrationAudioUrl(articleToPlay.id));
+      const narration = articleToPlay.narration;
+
+      if (!narration) {
+        throw new Error("Saved narration is unavailable.");
+      }
+
+      const segments = normalizedNarrationSegments(narration);
+
+      if (!segments?.length) {
+        throw new Error("Saved narration package is invalid.");
+      }
+
       const resume = narrationResumeRef.current;
       const resumeTime =
         resume?.articleId === articleToPlay.id ? resume.currentTime : 0;
       const narrationCues = matchingNarrationCues(
-        articleToPlay.narration?.alignment,
+        narration.alignment,
         sentencesRef.current,
         articleToPlay.title,
-        articleToPlay.narration?.durationSeconds,
+        narration.durationSeconds,
       );
       const requestedCueTime = seekToSentence
         ? narrationTimeForSentenceIndex(narrationCues, sentenceIndex)
@@ -1267,32 +1285,54 @@ export function ReaderApp() {
         : null;
       let lastSavedSentence = -1;
       let lastSavedAudioTime = Number.NEGATIVE_INFINITY;
+      const totalDuration =
+        narration.durationSeconds ??
+        segments.reduce(
+          (duration, segment) =>
+            Math.max(
+              duration,
+              segment.startSeconds + segment.durationSeconds,
+            ),
+          0,
+        );
+      const requestedGlobalTime =
+        requestedCueTime ??
+        (requestedProgress === null
+          ? resumeTime
+          : requestedProgress * totalDuration);
+      const start = narrationSegmentAtTime(segments, requestedGlobalTime) ?? {
+        segment: segments[0],
+        localTime: 0,
+      };
+      const startOffset = segments.findIndex(
+        (segment) => segment.index === start.segment.index,
+      );
 
       narrationResumeRef.current = null;
       activeNarrationArticleIdRef.current = articleToPlay.id;
-      audio.preload = "auto";
-      audio.playbackRate = rateRef.current;
-      audioRef.current = audio;
 
-      const updateNarrationProgress = (complete = false) => {
+      const updateNarrationProgress = (
+        audio: HTMLAudioElement,
+        segmentStartSeconds: number,
+        complete = false,
+      ) => {
         if (speechSessionRef.current !== session) {
           return;
         }
 
-        const configuredDuration = articleToPlay.narration?.durationSeconds;
-        const duration =
-          Number.isFinite(audio.duration) && audio.duration > 0
-            ? audio.duration
-            : typeof configuredDuration === "number" && configuredDuration > 0
-              ? configuredDuration
-              : 0;
+        const globalTime = complete
+          ? totalDuration
+          : Math.min(
+              Math.max(segmentStartSeconds + audio.currentTime, 0),
+              totalDuration,
+            );
         const progress = complete
           ? 1
-          : duration > 0
-            ? Math.min(Math.max(audio.currentTime / duration, 0), 1)
+          : totalDuration > 0
+            ? Math.min(Math.max(globalTime / totalDuration, 0), 1)
             : 0;
         const sentenceIndex =
-          narrationSentenceIndexAtTime(narrationCues, audio.currentTime) ??
+          narrationSentenceIndexAtTime(narrationCues, globalTime) ??
           narrationSentenceIndexAtProgress(sentencesRef.current, progress);
 
         setCurrentSentence(sentenceIndex);
@@ -1300,38 +1340,126 @@ export function ReaderApp() {
         if (
           sentenceIndex >= 0 &&
           sentenceIndex !== lastSavedSentence &&
-          (complete || audio.currentTime - lastSavedAudioTime >= 5)
+          (complete || globalTime - lastSavedAudioTime >= 5)
         ) {
           lastSavedSentence = sentenceIndex;
-          lastSavedAudioTime = audio.currentTime;
+          lastSavedAudioTime = globalTime;
           void saveProgress(sentenceIndex).catch((saveError) => {
             setError(messageFromError(saveError));
           });
         }
       };
 
-      await new Promise<void>((resolve, reject) => {
-        audio.onloadedmetadata = () => {
-          const requestedTime =
-            requestedCueTime ??
-            (requestedProgress === null
-              ? resumeTime
-              : requestedProgress * audio.duration);
+      let preloadedAudio: HTMLAudioElement | null = null;
 
-          if (requestedTime > 0 && requestedTime < audio.duration) {
-            audio.currentTime = requestedTime;
-          } else {
-            updateNarrationProgress();
+      try {
+        for (let offset = startOffset; offset < segments.length; offset += 1) {
+          if (speechSessionRef.current !== session) {
+            return;
           }
-        };
-        audio.ontimeupdate = () => updateNarrationProgress();
-        audio.onended = () => {
-          updateNarrationProgress(true);
-          resolve();
-        };
-        audio.onerror = () => reject(new Error("Saved narration playback failed."));
-        void audio.play().catch(reject);
-      });
+
+          const segment = segments[offset];
+          const segmentUrl = articleNarrationAudioUrl(
+            articleToPlay.id,
+            segments.length > 1 ? segment.index : undefined,
+          );
+          const audio = preloadedAudio ?? new Audio(segmentUrl);
+          const localStart = offset === startOffset ? start.localTime : 0;
+          const nextSegment = segments[offset + 1];
+
+          preloadedAudio = nextSegment
+            ? new Audio(
+                articleNarrationAudioUrl(articleToPlay.id, nextSegment.index),
+              )
+            : null;
+
+          if (preloadedAudio) {
+            preloadedAudio.preload = "auto";
+            preloadedAudio.load();
+          }
+
+          activeNarrationSegmentOffsetRef.current = segment.startSeconds;
+          audio.preload = "auto";
+          audio.playbackRate = rateRef.current;
+          audioRef.current = audio;
+
+          try {
+            await new Promise<void>((resolve, reject) => {
+              let playbackConfigured = false;
+              let playbackSettled = false;
+              const settlePlayback = (error?: unknown) => {
+                if (playbackSettled) {
+                  return;
+                }
+                playbackSettled = true;
+                if (audioPlaybackCancelRef.current === cancelPlayback) {
+                  audioPlaybackCancelRef.current = null;
+                }
+                if (error) {
+                  reject(error);
+                } else {
+                  resolve();
+                }
+              };
+              const cancelPlayback = () => settlePlayback();
+              const configurePlayback = () => {
+                if (playbackConfigured) {
+                  return;
+                }
+                playbackConfigured = true;
+
+                if (localStart > 0 && localStart < audio.duration) {
+                  audio.currentTime = localStart;
+                }
+
+                updateNarrationProgress(audio, segment.startSeconds);
+              };
+
+              audio.onloadedmetadata = configurePlayback;
+              audio.ontimeupdate = () =>
+                updateNarrationProgress(audio, segment.startSeconds);
+              audio.onended = () => {
+                if (offset === segments.length - 1) {
+                  updateNarrationProgress(audio, totalDuration, true);
+                }
+                settlePlayback();
+              };
+              audio.onerror = () =>
+                settlePlayback(
+                  new Error("Saved narration playback failed."),
+                );
+              audioPlaybackCancelRef.current = cancelPlayback;
+
+              if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
+                configurePlayback();
+              } else {
+                audio.load();
+              }
+              // Call play synchronously while the original click still has
+              // browser media activation. Metadata configuration can finish
+              // before playback begins without postponing this permission.
+              void audio.play().catch(settlePlayback);
+            });
+          } finally {
+            audio.onloadedmetadata = null;
+            audio.ontimeupdate = null;
+            audio.onended = null;
+            audio.onerror = null;
+            audio.pause();
+            audio.removeAttribute("src");
+            audio.load();
+            if (audioRef.current === audio) {
+              audioRef.current = null;
+            }
+          }
+        }
+      } finally {
+        if (preloadedAudio) {
+          preloadedAudio.pause();
+          preloadedAudio.removeAttribute("src");
+          preloadedAudio.load();
+        }
+      }
     },
     [cleanupAudio, saveProgress],
   );
@@ -1448,15 +1576,17 @@ export function ReaderApp() {
       audio &&
       activeNarrationArticleId &&
       Number.isFinite(audio.currentTime) &&
-      audio.currentTime > 0
+      activeNarrationSegmentOffsetRef.current + audio.currentTime > 0
     ) {
       narrationResumeRef.current = {
         articleId: activeNarrationArticleId,
-        currentTime: audio.currentTime,
+        currentTime:
+          activeNarrationSegmentOffsetRef.current + audio.currentTime,
       };
     }
 
     activeNarrationArticleIdRef.current = null;
+    activeNarrationSegmentOffsetRef.current = 0;
     cleanupAudio();
     window.speechSynthesis?.cancel();
     browserUtterancesRef.current = [];

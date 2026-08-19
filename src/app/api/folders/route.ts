@@ -3,6 +3,7 @@ import {
   createArticleFolder,
   listArticleFolders,
 } from "@/server/articles/articleService";
+import { wakeNarrationPolicyForOwnerBestEffort } from "@/server/articles/narrationPolicyScheduler";
 import { requireAppUser } from "@/server/auth/access";
 
 export const runtime = "nodejs";
@@ -15,6 +16,7 @@ export async function GET() {
   }
 
   const folders = await listArticleFolders(auth.user.ownerEmail);
+  await wakeNarrationPolicyForOwnerBestEffort(auth.user.ownerEmail);
   return NextResponse.json({ folders });
 }
 

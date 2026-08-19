@@ -171,6 +171,7 @@ test("persists and clears owner-scoped pre-generated narration", async () => {
     voice: "cedar",
     generatedAt: "2026-08-18T04:00:00.000Z",
     durationSeconds: 31.25,
+    generationFingerprint: "generation-v2",
   };
 
   try {
@@ -194,6 +195,15 @@ test("persists and clears owner-scoped pre-generated narration", async () => {
     );
     assert.deepEqual(updated?.narration, narration);
     assert.equal(updated?.processingCostUsd, 0.042);
+
+    const replayed = await repository.updateNarration(
+      "narrated",
+      "reader@example.com",
+      narration,
+      0.5,
+    );
+    assert.deepEqual(replayed?.narration, narration);
+    assert.equal(replayed?.processingCostUsd, 0.042);
 
     const persisted = JSON.parse(await readFile(storePath, "utf8"));
     assert.deepEqual(persisted.articles[0].narration, narration);

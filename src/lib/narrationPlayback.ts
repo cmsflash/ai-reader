@@ -2,12 +2,122 @@ import type { SentenceSegment } from "./sentences";
 import type {
   ArticleNarrationAlignment,
   ArticleNarrationCue,
+  ArticleNarrationSegment,
 } from "./types";
 
 export const narrationTitleSentenceIndex = -1;
 
-export function articleNarrationAudioUrl(articleId: string) {
-  return `/api/articles/${encodeURIComponent(articleId)}/audio`;
+export function articleNarrationAudioUrl(
+  articleId: string,
+  segmentIndex?: number,
+) {
+  const base = `/api/articles/${encodeURIComponent(articleId)}/audio`;
+
+  return typeof segmentIndex === "number"
+    ? `${base}?segment=${encodeURIComponent(segmentIndex)}`
+    : base;
+}
+
+export function normalizedNarrationSegments(
+  narration: {
+    artifactKey: string;
+    artifactVisibility: "private" | "public";
+    contentType: string;
+    byteLength: number;
+    durationSeconds?: number;
+    segments?: ArticleNarrationSegment[];
+  },
+) {
+  const segments = narration.segments;
+
+  if (segments?.length) {
+    const ordered = [...segments].sort((left, right) => left.index - right.index);
+    let expectedIndex = 0;
+    let previousEnd = 0;
+
+    for (const segment of ordered) {
+      if (
+        segment.index !== expectedIndex ||
+        !segment.artifactKey ||
+        !segment.contentType.toLocaleLowerCase().startsWith("audio/") ||
+        !Number.isSafeInteger(segment.byteLength) ||
+        segment.byteLength <= 0 ||
+        !Number.isFinite(segment.startSeconds) ||
+        !Number.isFinite(segment.durationSeconds) ||
+        segment.startSeconds < 0 ||
+        segment.durationSeconds <= 0 ||
+        Math.abs(segment.startSeconds - previousEnd) > 0.25
+      ) {
+        return undefined;
+      }
+
+      previousEnd = segment.startSeconds + segment.durationSeconds;
+      expectedIndex += 1;
+    }
+
+    if (
+      typeof narration.durationSeconds === "number" &&
+      Math.abs(previousEnd - narration.durationSeconds) > 0.75
+    ) {
+      return undefined;
+    }
+
+    return ordered;
+  }
+
+  const durationSeconds = narration.durationSeconds;
+
+  if (!Number.isFinite(durationSeconds) || (durationSeconds ?? 0) <= 0) {
+    return undefined;
+  }
+
+  return [
+    {
+      index: 0,
+      artifactKey: narration.artifactKey,
+      artifactVisibility: narration.artifactVisibility,
+      contentType: narration.contentType,
+      byteLength: narration.byteLength,
+      startSeconds: 0,
+      durationSeconds: durationSeconds as number,
+      inputSha256: "legacy",
+    },
+  ] satisfies ArticleNarrationSegment[];
+}
+
+export function narrationSegmentAtTime(
+  segments: ArticleNarrationSegment[],
+  globalTime: number,
+) {
+  if (segments.length === 0) {
+    return null;
+  }
+
+  const safeTime = Number.isFinite(globalTime) ? Math.max(globalTime, 0) : 0;
+  let low = 0;
+  let high = segments.length - 1;
+  let result = 0;
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+
+    if (segments[middle].startSeconds <= safeTime) {
+      result = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  const segment = segments[result];
+
+  return {
+    segment,
+    localTime: Math.min(
+      Math.max(safeTime - segment.startSeconds, 0),
+      segment.durationSeconds,
+    ),
+  };
 }
 
 export function narrationSentenceIndexAtProgress(

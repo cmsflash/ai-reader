@@ -378,6 +378,69 @@ test("loads narration only after an owner-scoped article lookup succeeds", async
   assert.equal(result?.artifact, artifact);
 });
 
+test("loads only the requested narration segment", async () => {
+  const article = articleFixture();
+  article.narration.segments = [
+    {
+      index: 0,
+      artifactKey: article.narration.artifactKey,
+      artifactVisibility: "public",
+      contentType: "audio/mpeg",
+      byteLength: 5,
+      startSeconds: 0,
+      durationSeconds: 1,
+      inputSha256: "a".repeat(64),
+    },
+    {
+      index: 1,
+      artifactKey: "articles/narrated/audio/segment-1.mp3",
+      artifactVisibility: "public",
+      contentType: "audio/mpeg",
+      byteLength: 7,
+      startSeconds: 1,
+      durationSeconds: 2,
+      inputSha256: "b".repeat(64),
+    },
+  ];
+  const reads = [];
+  const result = await getSavedArticleNarrationArtifact(
+    article.id,
+    "reader@example.com",
+    {
+      articleRepository: { async findById() { return article; } },
+      artifactStorage: {
+        async get(key, visibility) {
+          reads.push([key, visibility]);
+          return {
+            key,
+            body: Buffer.from("segment"),
+            contentType: "audio/mpeg",
+            byteLength: 7,
+          };
+        },
+      },
+    },
+    1,
+  );
+
+  assert.deepEqual(reads, [
+    ["articles/narrated/audio/segment-1.mp3", "public"],
+  ]);
+  assert.equal(result?.segment?.index, 1);
+  assert.equal(
+    await getSavedArticleNarrationArtifact(
+      article.id,
+      "reader@example.com",
+      {
+        articleRepository: { async findById() { return article; } },
+        artifactStorage: { async get() { throw new Error("unexpected"); } },
+      },
+      99,
+    ),
+    null,
+  );
+});
+
 test("does not load an artifact for a missing or unnarrated article", async () => {
   let artifactReads = 0;
   const artifactStorage = {

@@ -69,9 +69,13 @@ export async function deleteArticleArtifacts(article: Article) {
     .filter((block): block is Extract<ArticleBlock, { type: "image" }> => block.type === "image")
     .map((block) => block.artifactKey)
     .filter((key): key is string => Boolean(key));
-  const keys = article.narration?.artifactKey
-    ? [...imageKeys, article.narration.artifactKey]
-    : imageKeys;
+  const narrationKeys = article.narration
+    ? [
+        article.narration.artifactKey,
+        ...(article.narration.segments?.map((segment) => segment.artifactKey) ?? []),
+      ]
+    : [];
+  const keys = [...new Set([...imageKeys, ...narrationKeys])];
 
   await Promise.allSettled(keys.map((key) => getArtifactStorage().delete(key)));
 }

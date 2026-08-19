@@ -372,17 +372,27 @@ export class LocalJsonArticleRepository implements ArticleRepository {
         return { value: null };
       }
 
+      const currentArticle = store.articles[articleIndex];
+
+      if (
+        narration?.generationFingerprint &&
+        currentArticle.narration?.generationFingerprint ===
+          narration.generationFingerprint
+      ) {
+        return { value: currentArticle };
+      }
+
       if (onlyIfEmpty && store.articles[articleIndex].narration) {
         return { value: null };
       }
 
       const now = new Date().toISOString();
       const updatedArticle: Article = {
-        ...store.articles[articleIndex],
+        ...currentArticle,
         updatedAt: now,
         narration: narration ?? undefined,
         processingCostUsd: roundCost(
-          (store.articles[articleIndex].processingCostUsd ?? 0) +
+          (currentArticle.processingCostUsd ?? 0) +
             clampNumber(costUsd, 0, Number.MAX_SAFE_INTEGER),
         ),
       };

@@ -442,13 +442,14 @@ test("updates and maps owner-scoped pre-generated narration", async () => {
     model: "gpt-4o-mini-tts",
     voice: "cedar",
     generatedAt: "2026-08-18T04:00:00.000Z",
+    generationFingerprint: "generation-v2",
   };
   const repository = new PostgresArticleRepository({
     async query(statement, params) {
       const normalized = normalizeQuery(statement);
       queries.push({ statement: normalized, params });
 
-      if (normalized.startsWith("UPDATE articles")) {
+      if (normalized.startsWith("WITH updated AS")) {
         return [
           {
             ...articleRow("article-1"),
@@ -477,11 +478,15 @@ test("updates and maps owner-scoped pre-generated narration", async () => {
   assert.equal(queries[0].params[3], 0.042);
   assert.equal(queries[0].params[4], "reader@example.com");
   assert.equal(queries[0].params[5], true);
+  assert.equal(queries[0].params[6], "generation-v2");
   assert.match(queries[0].statement, /narration = \$3::jsonb/);
   assert.match(queries[0].statement, /processing_cost_usd = ROUND/);
   assert.match(queries[0].statement, /owner_email = \$5/);
   assert.match(queries[0].statement, /NOT \$6::boolean OR narration IS NULL/);
-  assert.match(queries[0].statement, /RETURNING .* narration$/);
+  assert.match(
+    queries[0].statement,
+    /generationFingerprint.*IS DISTINCT FROM \$7::text/,
+  );
 });
 
 function normalizeQuery(statement) {

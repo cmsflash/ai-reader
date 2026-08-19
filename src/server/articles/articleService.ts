@@ -31,6 +31,10 @@ import {
   decodeArticleListCursor,
   encodeArticleListCursor,
 } from "@/server/articles/articleListCursor";
+import {
+  narrationPolicyFolderIdsForMembershipChange,
+  scheduleNarrationPolicyForFoldersBestEffort,
+} from "@/server/articles/narrationPolicyScheduler";
 
 type ImportedArticleOptions = {
   deduplication?: ArticleDeduplicationIndex;
@@ -103,6 +107,7 @@ export async function getSavedArticleNarrationArtifact(
     articleRepository?: Pick<ArticleRepository, "findById">;
     artifactStorage?: Pick<ArtifactStorage, "get">;
   } = {},
+  segmentIndex?: number,
 ) {
   const article = await (
     dependencies.articleRepository ?? getArticleRepository()
@@ -112,15 +117,29 @@ export async function getSavedArticleNarrationArtifact(
     return null;
   }
 
+  const segment =
+    typeof segmentIndex === "number"
+      ? article.narration.segments?.find(
+          (candidate) => candidate.index === segmentIndex,
+        )
+      : undefined;
+
+  if (typeof segmentIndex === "number" && !segment) {
+    return null;
+  }
+
+  const artifactMetadata = segment ?? article.narration;
+
   const artifact = await (
     dependencies.artifactStorage ?? getArtifactStorage()
   ).get(
-    article.narration.artifactKey,
-    article.narration.artifactVisibility,
+    artifactMetadata.artifactKey,
+    artifactMetadata.artifactVisibility,
   );
 
-  return artifact?.contentType.toLowerCase().startsWith("audio/")
-    ? { article, artifact }
+  return artifact?.contentType.toLowerCase().startsWith("audio/") &&
+    artifact.byteLength === artifactMetadata.byteLength
+    ? { article, artifact, segment }
     : null;
 }
 
@@ -211,11 +230,22 @@ export async function updateSavedArticleOrganization(
   ownerEmail: string,
   organization: ArticleOrganizationPatch,
 ) {
-  return getArticleRepository().updateOrganization(
+  const repository = getArticleRepository();
+  const previous = await repository.findById(id, ownerEmail);
+  const updated = await repository.updateOrganization(
     id,
     ownerEmail,
     organization,
   );
+
+  if (updated) {
+    await scheduleNarrationPolicyForFoldersBestEffort(
+      ownerEmail,
+      narrationPolicyFolderIdsForMembershipChange(previous, updated),
+    );
+  }
+
+  return updated;
 }
 
 export async function advanceSavedArticleProgress(
@@ -245,6 +275,10 @@ export async function deleteSavedArticle(id: string, ownerEmail: string) {
   const deleted = await getArticleRepository().deleteById(id, ownerEmail);
 
   if (deleted && article) {
+    await scheduleNarrationPolicyForFoldersBestEffort(
+      ownerEmail,
+      narrationPolicyFolderIdsForMembershipChange(article),
+    );
     await deleteArticleArtifacts(article);
   }
 
@@ -265,6 +299,10 @@ export async function deleteSavedArticleIfUnreferenced(
   const deleted = await repository.deleteByIdIfUnreferenced(id, ownerEmail);
 
   if (deleted) {
+    await scheduleNarrationPolicyForFoldersBestEffort(
+      ownerEmail,
+      narrationPolicyFolderIdsForMembershipChange(article),
+    );
     await deleteArticleArtifacts(article);
   }
 
@@ -359,6 +397,11 @@ async function persistImportedArticle(
       importSourceUrl: article.sourceUrl,
     };
   }
+
+  await scheduleNarrationPolicyForFoldersBestEffort(
+    ownerEmail,
+    narrationPolicyFolderIdsForMembershipChange(null, saved),
+  );
 
   return {
     article: saved,
