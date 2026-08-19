@@ -396,9 +396,15 @@ export function wavDurationSeconds(buffer: Buffer) {
   let cursor = 12;
   while (cursor + 8 <= buffer.byteLength) {
     const chunkId = buffer.toString("ascii", cursor, cursor + 4);
-    const chunkBytes = buffer.readUInt32LE(cursor + 4);
+    const declaredChunkBytes = buffer.readUInt32LE(cursor + 4);
     const chunkStart = cursor + 8;
-    if (chunkStart + chunkBytes > buffer.byteLength) {
+    const availableChunkBytes = buffer.byteLength - chunkStart;
+    const isStreamingDataChunk =
+      chunkId === "data" && declaredChunkBytes === 0xffffffff;
+    const chunkBytes = isStreamingDataChunk
+      ? availableChunkBytes
+      : declaredChunkBytes;
+    if (chunkBytes > availableChunkBytes) {
       throw new Error("Speech generation returned a truncated WAV file.");
     }
     if (chunkId === "fmt " && chunkBytes >= 16) {
