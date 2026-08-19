@@ -113,6 +113,19 @@ test("WAV duration accepts a streaming data-length sentinel", () => {
   wav.writeUInt32LE(0xffffffff, 40);
 
   assert.equal(wavDurationSeconds(wav), 2);
+
+  const misalignedStream = wav.subarray(0, wav.byteLength - 1);
+  assert.throws(
+    () => wavDurationSeconds(misalignedStream),
+    /without sample data/u,
+  );
+
+  const truncatedDeclaredChunk = Buffer.from(wav);
+  truncatedDeclaredChunk.writeUInt32LE(dataBytes + 2, 40);
+  assert.throws(
+    () => wavDurationSeconds(truncatedDeclaredChunk),
+    /truncated WAV/u,
+  );
 });
 
 test("the paid sentence generation step never retries automatically", () => {

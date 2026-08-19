@@ -392,6 +392,7 @@ export function wavDurationSeconds(buffer: Buffer) {
   }
 
   let byteRate = 0;
+  let blockAlign = 0;
   let dataBytes = 0;
   let cursor = 12;
   while (cursor + 8 <= buffer.byteLength) {
@@ -409,13 +410,19 @@ export function wavDurationSeconds(buffer: Buffer) {
     }
     if (chunkId === "fmt " && chunkBytes >= 16) {
       byteRate = buffer.readUInt32LE(chunkStart + 8);
+      blockAlign = buffer.readUInt16LE(chunkStart + 12);
     } else if (chunkId === "data") {
       dataBytes += chunkBytes;
     }
     cursor = chunkStart + chunkBytes + (chunkBytes % 2);
   }
 
-  if (byteRate <= 0 || dataBytes <= 0) {
+  if (
+    byteRate <= 0 ||
+    blockAlign <= 0 ||
+    dataBytes <= 0 ||
+    dataBytes % blockAlign !== 0
+  ) {
     throw new Error("Speech generation returned WAV audio without sample data.");
   }
   return round(dataBytes / byteRate, 6);
