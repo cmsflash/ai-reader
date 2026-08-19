@@ -68,6 +68,13 @@ import {
   narrationTitleSentenceIndex,
 } from "@/lib/narrationPlayback";
 import {
+  appHistoryEntry,
+  appUrlForHistoryEntry,
+  articleIdFromAppUrl,
+  type AppHistoryEntry,
+  type AppView,
+} from "@/lib/appHistory";
+import {
   integrationSyncMaxRequests,
   integrationSyncRequestBatchSize,
   mergeIntegrationSyncResponses,
@@ -193,14 +200,6 @@ type SelectionDiscussionAction = {
   tooLong: boolean;
 };
 
-type AppView = "library" | "add" | "reader" | "settings";
-
-type AppHistoryEntry = {
-  view: AppView;
-  articleId?: string;
-  depth: number;
-};
-
 const historyMetadataStorageKey = "ai-reader:history-metadata";
 
 type HistoryMetadata = {
@@ -251,43 +250,18 @@ function persistHistoryMetadata(
   }
 }
 
-function appHistoryEntry(state: unknown): AppHistoryEntry | null {
-  if (!state || typeof state !== "object") {
-    return null;
-  }
-
-  const entry = (state as { aiReader?: unknown }).aiReader;
-
-  if (!entry || typeof entry !== "object") {
-    return null;
-  }
-
-  const candidate = entry as Partial<AppHistoryEntry>;
-
-  if (
-    !["library", "add", "reader", "settings"].includes(candidate.view ?? "") ||
-    typeof candidate.depth !== "number"
-  ) {
-    return null;
-  }
-
-  if (candidate.view === "reader" && !candidate.articleId) {
-    return null;
-  }
-
-  return candidate as AppHistoryEntry;
-}
-
 function writeAppHistory(mode: "push" | "replace", entry: AppHistoryEntry) {
   const currentState = window.history.state;
   const preservedState =
     currentState && typeof currentState === "object" ? currentState : {};
   const nextState = { ...preservedState, aiReader: entry };
 
+  const nextUrl = appUrlForHistoryEntry(window.location.href, entry);
+
   if (mode === "push") {
-    window.history.pushState(nextState, "", window.location.href);
+    window.history.pushState(nextState, "", nextUrl);
   } else {
-    window.history.replaceState(nextState, "", window.location.href);
+    window.history.replaceState(nextState, "", nextUrl);
   }
 }
 
@@ -934,13 +908,14 @@ export function ReaderApp() {
     }
 
     let cancelled = false;
+    const articleId = selectedId;
 
     async function loadArticle() {
       setIsArticleLoading(true);
       setArticleLoadError(null);
       try {
         const data = await requestJson<ArticleResponse>(
-          `/api/articles/${selectedId}`,
+          `/api/articles/${encodeURIComponent(articleId)}`,
         );
         if (cancelled) {
           return;
@@ -1633,8 +1608,23 @@ export function ReaderApp() {
     };
 
     const initialEntry = appHistoryEntry(window.history.state);
+    const linkedArticleId = articleIdFromAppUrl(window.location.href);
 
-    if (initialEntry) {
+    if (
+      linkedArticleId &&
+      (initialEntry?.view !== "reader" ||
+        initialEntry.articleId !== linkedArticleId)
+    ) {
+      writeAppHistory("replace", { view: "library", depth: 0 });
+      const linkedEntry: AppHistoryEntry = {
+        view: "reader",
+        articleId: linkedArticleId,
+        depth: 1,
+      };
+      writeAppHistory("push", linkedEntry);
+      applyEntry(linkedEntry);
+    } else if (initialEntry) {
+      writeAppHistory("replace", initialEntry);
       applyEntry(initialEntry);
     } else {
       writeAppHistory("replace", { view: "library", depth: 0 });
