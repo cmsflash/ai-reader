@@ -688,6 +688,18 @@ test("failed paid segments retain resumable artifact diagnostics", async () => {
   assert.equal(failed?.diagnosticCostUsd, 0.001);
   assert.match(captured.statement, /artifact_key = CASE/);
   assert.match(captured.statement, /diagnostic_cost_usd = CASE/);
+  assert.match(
+    captured.statement,
+    /GREATEST\(segment\.attempt_count - 1, 0\)/,
+  );
+  assert.match(
+    captured.statement,
+    /GREATEST\(segment\.cycle_attempt_count - 1, 0\)/,
+  );
+  assert.doesNotMatch(
+    captured.statement,
+    /GREATEST\((?:attempt_count|cycle_attempt_count) - 1, 0\)/,
+  );
 });
 
 test("a replacement speech artifact cannot inherit stale alignment or QA", async () => {

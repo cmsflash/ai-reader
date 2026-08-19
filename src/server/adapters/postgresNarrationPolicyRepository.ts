@@ -1600,12 +1600,12 @@ implements NarrationPolicyRepository {
             ELSE diagnostic_cost_usd
           END,
           attempt_count = CASE
-            WHEN $11::boolean THEN GREATEST(attempt_count - 1, 0)
-            ELSE attempt_count
+            WHEN $11::boolean THEN GREATEST(segment.attempt_count - 1, 0)
+            ELSE segment.attempt_count
           END,
           cycle_attempt_count = CASE
-            WHEN $11::boolean THEN GREATEST(cycle_attempt_count - 1, 0)
-            ELSE cycle_attempt_count
+            WHEN $11::boolean THEN GREATEST(segment.cycle_attempt_count - 1, 0)
+            ELSE segment.cycle_attempt_count
           END,
           updated_at = $9::timestamptz
         FROM article_narration_jobs AS job
