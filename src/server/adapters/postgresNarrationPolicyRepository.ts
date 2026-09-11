@@ -405,47 +405,30 @@ implements NarrationPolicyRepository {
   }
 
   async isNarrationCandidateEligible(input: {
+    onDemand?: boolean;
     ownerEmail: string;
     folderId: string;
     articleId: string;
     sourceTextSha256: string;
     sentenceMapFingerprint: string;
   }) {
+    if (!input.onDemand) return false;
     const rows = await this.queryRows<Pick<
       NarrationCandidateRow,
       "id" | "title" | "text_content" | "blocks"
     >>(
       `
-        WITH newest AS (
-          SELECT
-            article.id,
-            article.title,
-            article.text_content,
-            article.blocks
-          FROM articles AS article
-          JOIN reading_folders AS folder
-            ON folder.owner_email = article.owner_email
-            AND folder.id = article.folder_id
-            AND folder.is_archive = false
-          WHERE
-            article.owner_email = $1
-            AND article.folder_id = $2
-            AND article.archived_at IS NULL
-          ORDER BY
-            article.created_at DESC,
-            lower(article.title) COLLATE "C" ASC,
-            article.id ASC
-          LIMIT 10
-        )
         SELECT id, title, text_content, blocks
-        FROM newest
-        WHERE id = $3
+        FROM articles
+        WHERE owner_email = $1 AND folder_id = $2 AND id = $3
+          AND $4::boolean
         LIMIT 1
       `,
       [
         normalizeOwnerEmail(input.ownerEmail),
         requiredText(input.folderId, "Folder ID"),
         requiredText(input.articleId, "Article ID"),
+        input.onDemand === true,
       ],
     );
     const article = rows[0];
@@ -469,6 +452,7 @@ implements NarrationPolicyRepository {
   async claimNarrationJob(
     input: ClaimNarrationJobInput,
   ): Promise<ClaimNarrationJobResult> {
+    if (!input.onDemand) return { kind: "not-eligible" };
     const normalized = normalizeClaimJobInput(input);
     const now = new Date();
     await this.expireExhaustedNarrationJob(normalized, now);
@@ -477,32 +461,9 @@ implements NarrationPolicyRepository {
     const rows = await this.queryRows<NarrationJobRow>(
       `
         WITH eligible_articles AS (
-          SELECT eligible.id, eligible.rank
-          FROM (
-            SELECT
-              article.id,
-              ROW_NUMBER() OVER (
-                ORDER BY
-                  article.created_at DESC,
-                  lower(article.title) COLLATE "C" ASC,
-                  article.id ASC
-              ) AS rank
-            FROM articles AS article
-            JOIN reading_folders AS folder
-              ON folder.owner_email = article.owner_email
-              AND folder.id = article.folder_id
-              AND folder.is_archive = false
-            WHERE
-              article.owner_email = $2
-              AND article.folder_id = $4
-              AND article.archived_at IS NULL
-            ORDER BY
-              article.created_at DESC,
-              lower(article.title) COLLATE "C" ASC,
-              article.id ASC
-            LIMIT 10
-          ) AS eligible
-          WHERE eligible.id = $3
+          SELECT id, 1 AS rank FROM articles
+          WHERE owner_email = $2 AND folder_id = $4 AND id = $3
+            AND $19::boolean
         )
         INSERT INTO article_narration_jobs (
           id,
@@ -642,6 +603,7 @@ implements NarrationPolicyRepository {
         leaseExpiry(now, input.leaseMs, defaultJobLeaseMs),
         normalized.estimatedCostUsd,
         normalized.folderInvalidationVersion,
+        input.onDemand === true,
       ],
     );
 

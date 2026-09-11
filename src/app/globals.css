@@ -4826,3 +4826,26 @@ input[type="range"] {
     border: 1px solid CanvasText;
   }
 }
+
+.audio-preferences {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+  padding: 10px 18px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+.audio-preferences label { display: inline-flex; align-items: center; gap: 7px; }
+.voice-mode-control select {
+  min-height: 40px;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+}
+.audio-preferences [role="status"] { flex-basis: 100%; }

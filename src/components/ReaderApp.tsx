@@ -52,7 +52,7 @@ import {
 } from "@/lib/articleImage";
 import { sentenceHighlightState } from "@/lib/sentenceHighlight";
 import {
-  browserSpeechPlan,
+  localBrowserSpeechPlan,
   detectSpeechLanguage,
   type SpeechLanguage,
 } from "@/lib/speechLanguage";
@@ -293,6 +293,15 @@ export function ReaderApp() {
   const [isArticleLoading, setIsArticleLoading] = useState(false);
   const [readerArchiveBusy, setReaderArchiveBusy] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [voiceMode, setVoiceMode] = useState<"online" | "local">("online");
+  const [localFallback, setLocalFallback] = useState(true);
+  const [audioNotice, setAudioNotice] = useState<string | null>(null);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("reader-voice-mode") === "local") setVoiceMode("local");
+      setLocalFallback(localStorage.getItem("reader-local-fallback") !== "false");
+    } catch { /* Storage may be unavailable in private browsing. */ }
+  }, []);
   const [currentSentence, setCurrentSentence] = useState(0);
   const [contextSentenceIndex, setContextSentenceIndex] = useState<
     number | null
@@ -352,6 +361,8 @@ export function ReaderApp() {
   const resolvedHistoryIdsRef = useRef(new Map<string, string | null>());
   const unavailableArticleIdsRef = useRef(new Set<string>());
   const sentencesRef = useRef<SentenceSegment[]>([]);
+  const currentSentenceRef = useRef(0);
+  useEffect(() => { currentSentenceRef.current = currentSentence; }, [currentSentence]);
   const speechSessionRef = useRef(0);
   const lastTapRef = useRef<{ index: number; time: number } | null>(null);
   const rateRef = useRef(rate);
@@ -970,7 +981,7 @@ export function ReaderApp() {
   const saveProgress = useCallback(async (sentenceIndex: number) => {
     const id = articleIdRef.current;
 
-    if (!id) {
+    if (!id || !navigator.onLine) {
       return;
     }
 
@@ -1023,7 +1034,7 @@ export function ReaderApp() {
         throw new Error("No speech engine is available.");
       }
 
-      const plan = browserSpeechPlan(
+      const plan = localBrowserSpeechPlan(
         text,
         browserVoicesRef.current.length > 0
           ? browserVoicesRef.current
@@ -1055,28 +1066,7 @@ export function ReaderApp() {
     [],
   );
 
-  const speakWithBrowser = useCallback(
-    (
-      text: string,
-      language: SpeechLanguage | undefined,
-      onEnd: () => void,
-    ) => {
-      const utterance = browserUtterance(text, language);
-      browserUtterancesRef.current.push(utterance);
-      utterance.onend = () => {
-        releaseBrowserUtterance(utterance);
-        onEnd();
-      };
-      utterance.onerror = () => {
-        releaseBrowserUtterance(utterance);
-        onEnd();
-      };
-      window.speechSynthesis.speak(utterance);
-    },
-    [browserUtterance, releaseBrowserUtterance],
-  );
-
-  const speakMandarinFrom = useCallback(
+  const speakLocalFrom = useCallback(
     (startIndex: number, session: number) => {
       const sentences = sentencesRef.current;
       let nextIndex = startIndex;
@@ -1116,6 +1106,7 @@ export function ReaderApp() {
 
           if (!queuedAnother && segmentIndex === sentences.length - 1) {
             setIsSpeaking(false);
+            setAudioNotice(null);
           }
         };
         utterance.onerror = () => {
@@ -1129,7 +1120,7 @@ export function ReaderApp() {
           window.speechSynthesis.cancel();
           browserUtterancesRef.current = [];
           setIsSpeaking(false);
-          setError("Mandarin voice playback failed.");
+          setError("Local voice playback failed.");
         };
 
         window.speechSynthesis.speak(utterance);
@@ -1148,76 +1139,6 @@ export function ReaderApp() {
       }
     },
     [browserUtterance, releaseBrowserUtterance, saveProgress],
-  );
-
-  const playElevenLabsAudio = useCallback(
-    async (text: string, session: number) => {
-      const articleId = articleIdRef.current;
-      const response = await fetch("/api/tts", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ text, articleId }),
-      });
-
-      if (!response.ok) {
-        const body = (await response.json().catch(() => ({}))) as {
-          error?: string;
-        };
-        throw new Error(
-          body.error ?? `TTS request failed with ${response.status}.`,
-        );
-      }
-
-      const costUsd = Number(
-        response.headers.get("x-processing-cost-usd") ?? 0,
-      );
-      const audioBlob = await response.blob();
-
-      if (speechSessionRef.current !== session) {
-        return;
-      }
-
-      if (articleId && Number.isFinite(costUsd) && costUsd > 0) {
-        setArticle((current) =>
-          current?.id === articleId
-            ? {
-                ...current,
-                processingCostUsd: roundCost(
-                  (current.processingCostUsd ?? 0) + costUsd,
-                ),
-              }
-            : current,
-        );
-        setArticles((current) =>
-          current.map((item) =>
-            item.id === articleId
-              ? {
-                  ...item,
-                  processingCostUsd: roundCost(
-                    (item.processingCostUsd ?? 0) + costUsd,
-                  ),
-                }
-              : item,
-          ),
-        );
-      }
-
-      cleanupAudio();
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
-      audio.playbackRate = rateRef.current;
-      audioUrlRef.current = audioUrl;
-      audioRef.current = audio;
-
-      await new Promise<void>((resolve, reject) => {
-        audio.onended = () => resolve();
-        audio.onerror = () => reject(new Error("Audio playback failed."));
-        void audio.play().catch(reject);
-      });
-    },
-    [cleanupAudio],
   );
 
   const playArticleNarration = useCallback(
@@ -1441,105 +1362,69 @@ export function ReaderApp() {
 
   const speakFrom = useCallback(
     (sentenceIndex: number, seekToSentence = false) => {
-      const sentences = sentencesRef.current;
-
-      if (sentences.length === 0) {
-        return;
-      }
-
-      const startIndex = Math.min(
-        Math.max(sentenceIndex, 0),
-        sentences.length - 1,
-      );
-      const session = speechSessionRef.current + 1;
-      speechSessionRef.current = session;
+      if (!article || sentencesRef.current.length === 0) return;
+      const startIndex = Math.min(Math.max(sentenceIndex, 0), sentencesRef.current.length - 1);
+      const session = ++speechSessionRef.current;
       cleanupAudio();
-      window.speechSynthesis.cancel();
+      window.speechSynthesis?.cancel();
       browserUtterancesRef.current = [];
       setIsSpeaking(true);
       setError(null);
-
-      if (article?.narration) {
-        void playArticleNarration(
-          article,
-          session,
-          startIndex,
-          seekToSentence,
-        )
-          .then(() => {
-            if (speechSessionRef.current === session) {
-              activeNarrationArticleIdRef.current = null;
-              narrationResumeRef.current = null;
-              cleanupAudio();
-              setIsSpeaking(false);
-            }
-          })
-          .catch((playbackError) => {
-            if (speechSessionRef.current === session) {
-              activeNarrationArticleIdRef.current = null;
-              cleanupAudio();
-              setIsSpeaking(false);
-              setError(messageFromError(playbackError));
-            }
-          });
-        return;
-      }
-
-      if (speechLanguage === "zh-CN") {
-        speakMandarinFrom(startIndex, session);
-        return;
-      }
-
-      const speakAt = async (index: number) => {
-        if (speechSessionRef.current !== session) {
-          return;
-        }
-
-        if (index >= sentencesRef.current.length) {
-          setIsSpeaking(false);
-          return;
-        }
-
-        const segment = sentencesRef.current[index];
-        setCurrentSentence(segment.sentenceIndex);
-        void saveProgress(segment.sentenceIndex).catch((saveError) => {
-          setError(messageFromError(saveError));
-        });
-
-        try {
-          await playElevenLabsAudio(segment.text, session);
-          window.setTimeout(() => void speakAt(index + 1), 80);
-        } catch (playbackError) {
-          if (speechSessionRef.current !== session) {
-            return;
-          }
-
-          setError(
-            `${messageFromError(playbackError)} Falling back to browser voice.`,
-          );
-          try {
-            speakWithBrowser(segment.text, undefined, () =>
-              window.setTimeout(() => void speakAt(index + 1), 80),
-            );
-          } catch (fallbackError) {
-            setIsSpeaking(false);
-            setError(messageFromError(fallbackError));
-          }
-        }
+      setAudioNotice(null);
+      const playLocal = () => {
+        setAudioNotice("Playing with a local device voice.");
+        speakLocalFrom(startIndex, session);
       };
-
-      void speakAt(startIndex);
+      if (voiceMode === "local") { playLocal(); return; }
+      if (!navigator.onLine) {
+        if (localFallback) { playLocal(); }
+        else { setIsSpeaking(false); setError("You're offline. Choose Local voice to listen."); }
+        return;
+      }
+      void (async () => {
+        let playable = article;
+        if (!playable.narration) {
+          setAudioNotice("Generating audio for this article… You can use Local voice while it prepares.");
+          const url = `/api/articles/${encodeURIComponent(article.id)}/narration/request`;
+          let response = await fetch(url, { method: "POST" });
+          const deadline = Date.now() + 15 * 60_000;
+          while (speechSessionRef.current === session) {
+            const result = await response.json() as { status?: string; article?: Article; error?: string };
+            if (speechSessionRef.current !== session) return;
+            if (!response.ok || result.status === "failed") throw new Error(result.error ?? "Online narration failed.");
+            if (result.status === "ready" && result.article?.narration) {
+              playable = result.article;
+              setArticle((current) => current?.id === playable.id ? playable : current);
+              break;
+            }
+            if (Date.now() > deadline) throw new Error("Audio is still preparing. Try Play again later or use Local voice.");
+            await new Promise((resolve) => window.setTimeout(resolve, 2500));
+            if (speechSessionRef.current !== session) return;
+            response = await fetch(url, { cache: "no-store" });
+          }
+        }
+        if (speechSessionRef.current !== session) return;
+        setAudioNotice("Playing saved online narration.");
+        await playArticleNarration(playable, session, startIndex, seekToSentence);
+        if (speechSessionRef.current === session) {
+          activeNarrationArticleIdRef.current = null;
+          narrationResumeRef.current = null;
+          cleanupAudio();
+          setIsSpeaking(false);
+          setAudioNotice(null);
+        }
+      })().catch((playbackError) => {
+        if (speechSessionRef.current !== session) return;
+        activeNarrationArticleIdRef.current = null;
+        cleanupAudio();
+        setError(messageFromError(playbackError));
+        if (localFallback) {
+          setAudioNotice("Online audio unavailable. Playing with a local device voice.");
+          speakLocalFrom(Math.max(startIndex, currentSentenceRef.current), session);
+        } else { setIsSpeaking(false); setAudioNotice(null); }
+      });
     },
-    [
-      cleanupAudio,
-      article,
-      playElevenLabsAudio,
-      playArticleNarration,
-      saveProgress,
-      speakMandarinFrom,
-      speakWithBrowser,
-      speechLanguage,
-    ],
+    [article, cleanupAudio, playArticleNarration, speakLocalFrom, voiceMode, localFallback],
   );
 
   const stopSpeaking = useCallback(() => {
@@ -1566,6 +1451,7 @@ export function ReaderApp() {
     window.speechSynthesis?.cancel();
     browserUtterancesRef.current = [];
     setIsSpeaking(false);
+    setAudioNotice(null);
   }, [cleanupAudio]);
 
   useEffect(() => stopSpeaking, [stopSpeaking]);
@@ -3198,16 +3084,16 @@ export function ReaderApp() {
                   title={
                     isSpeaking
                       ? "Pause"
-                      : article.narration
-                        ? "Play saved AI narration"
-                        : "Read aloud"
+                      : voiceMode === "local"
+                        ? "Play local voice"
+                        : article.narration ? "Play saved AI narration" : "Generate and play audio"
                   }
                   aria-label={
                     isSpeaking
                       ? "Pause"
-                      : article.narration
-                        ? "Play saved AI narration"
-                        : "Read aloud"
+                      : voiceMode === "local"
+                        ? "Play local voice"
+                        : article.narration ? "Play saved AI narration" : "Generate and play audio"
                   }
                   onClick={() => {
                     if (isSpeaking) {
@@ -3250,6 +3136,29 @@ export function ReaderApp() {
               </div>
             ) : null}
           </header>
+
+          {article ? <div className="audio-preferences">
+                <label className="voice-mode-control">
+                  <span className="visually-hidden">Audio source</span>
+                  <select aria-label="Audio source" value={voiceMode} onChange={(event) => {
+                    stopSpeaking();
+                    const mode = event.target.value === "local" ? "local" : "online";
+                    setVoiceMode(mode);
+                    try { localStorage.setItem("reader-voice-mode", mode); } catch { /* Optional preference. */ }
+                  }}>
+                    <option value="online">Online voice</option>
+                    <option value="local">Local voice (offline)</option>
+                  </select>
+                </label>
+
+            {voiceMode === "online" ? <label>
+              <input type="checkbox" checked={localFallback} onChange={(event) => {
+                setLocalFallback(event.target.checked);
+                try { localStorage.setItem("reader-local-fallback", String(event.target.checked)); } catch { /* Optional preference. */ }
+              }} /> Use local voice if online audio is unavailable
+            </label> : <span>Uses an installed voice for the open article, even offline. No generation charge.</span>}
+            {audioNotice ? <span role="status">{audioNotice}</span> : null}
+          </div> : null}
 
           {(articleLoadError ?? error) ? (
             <div className="reader-inline-notice error" role="status">
@@ -4782,8 +4691,4 @@ function formatCost(costUsd: number) {
   }
 
   return costUsd < 0.01 ? `$${costUsd.toFixed(4)}` : `$${costUsd.toFixed(2)}`;
-}
-
-function roundCost(value: number) {
-  return Math.round(value * 1_000_000) / 1_000_000;
 }

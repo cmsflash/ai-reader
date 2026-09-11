@@ -31,10 +31,6 @@ import {
   decodeArticleListCursor,
   encodeArticleListCursor,
 } from "@/server/articles/articleListCursor";
-import {
-  narrationPolicyFolderIdsForMembershipChange,
-  scheduleNarrationPolicyForFoldersBestEffort,
-} from "@/server/articles/narrationPolicyScheduler";
 
 type ImportedArticleOptions = {
   deduplication?: ArticleDeduplicationIndex;
@@ -231,19 +227,11 @@ export async function updateSavedArticleOrganization(
   organization: ArticleOrganizationPatch,
 ) {
   const repository = getArticleRepository();
-  const previous = await repository.findById(id, ownerEmail);
   const updated = await repository.updateOrganization(
     id,
     ownerEmail,
     organization,
   );
-
-  if (updated) {
-    await scheduleNarrationPolicyForFoldersBestEffort(
-      ownerEmail,
-      narrationPolicyFolderIdsForMembershipChange(previous, updated),
-    );
-  }
 
   return updated;
 }
@@ -275,10 +263,6 @@ export async function deleteSavedArticle(id: string, ownerEmail: string) {
   const deleted = await getArticleRepository().deleteById(id, ownerEmail);
 
   if (deleted && article) {
-    await scheduleNarrationPolicyForFoldersBestEffort(
-      ownerEmail,
-      narrationPolicyFolderIdsForMembershipChange(article),
-    );
     await deleteArticleArtifacts(article);
   }
 
@@ -299,10 +283,6 @@ export async function deleteSavedArticleIfUnreferenced(
   const deleted = await repository.deleteByIdIfUnreferenced(id, ownerEmail);
 
   if (deleted) {
-    await scheduleNarrationPolicyForFoldersBestEffort(
-      ownerEmail,
-      narrationPolicyFolderIdsForMembershipChange(article),
-    );
     await deleteArticleArtifacts(article);
   }
 
@@ -397,11 +377,6 @@ async function persistImportedArticle(
       importSourceUrl: article.sourceUrl,
     };
   }
-
-  await scheduleNarrationPolicyForFoldersBestEffort(
-    ownerEmail,
-    narrationPolicyFolderIdsForMembershipChange(null, saved),
-  );
 
   return {
     article: saved,

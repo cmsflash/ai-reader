@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   browserSpeechPlan,
+  localBrowserSpeechPlan,
   detectSpeechLanguage,
   selectBrowserSpeechVoice,
 } from "../src/lib/speechLanguage.ts";
@@ -65,3 +66,14 @@ function voice(name, lang, isDefault = false) {
     localService: true,
   };
 }
+
+
+test("offline narration never selects an online voice", () => {
+  const remote = { name: "Online Natural", lang: "en-US", localService: false, default: true };
+  const local = { name: "Installed", lang: "en-US", localService: true };
+  assert.equal(localBrowserSpeechPlan("Hello world.", [remote, local]).voice, local);
+  assert.throws(() => localBrowserSpeechPlan("Hello world.", [remote]), /No installed English/);
+  assert.throws(() => localBrowserSpeechPlan("你好世界。", [local]), /No installed Mandarin/);
+  const mandarin = { name: "Tingting", lang: "zh-CN", localService: true };
+  assert.equal(localBrowserSpeechPlan("你好世界。", [remote, mandarin]).voice, mandarin);
+});

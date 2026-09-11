@@ -176,7 +176,7 @@ test("selects exactly the deterministic active newest ten and classifies missing
   );
 });
 
-test("checks one top-ten candidate without loading every narration", async () => {
+test("checks a requested article without restricting folder rank or archive status", async () => {
   let captured;
   const article = {
     id: "article-1",
@@ -205,6 +205,7 @@ test("checks one top-ten candidate without loading every narration", async () =>
   }).listNewestNarrationCandidates("reader@example.com", "folder-1");
 
   const eligible = await repository.isNarrationCandidateEligible({
+    onDemand: true,
     ownerEmail: " Reader@Example.com ",
     folderId: "folder-1",
     articleId: "article-1",
@@ -217,14 +218,15 @@ test("checks one top-ten candidate without loading every narration", async () =>
     "reader@example.com",
     "folder-1",
     "article-1",
+    true,
   ]);
-  assert.match(captured.statement, /WITH newest AS/);
-  assert.match(captured.statement, /LIMIT 10/);
-  assert.match(captured.statement, /WHERE id = \$3/);
+  assert.match(captured.statement, /AND \$4::boolean/);
+  assert.doesNotMatch(captured.statement, /LIMIT 10|archived_at/);
+  assert.match(captured.statement, /AND id = \$3/);
   assert.doesNotMatch(captured.statement, /narration/);
 });
 
-test("claims an eligible article job with top-ten recheck, lease, and per-cycle attempt cap", async () => {
+test("claims a requested article job with lease and per-cycle attempt cap", async () => {
   let captured;
   const repository = new PostgresNarrationPolicyRepository({
     async query(statement, params) {
@@ -257,6 +259,7 @@ test("claims an eligible article job with top-ten recheck, lease, and per-cycle 
   });
 
   const result = await repository.claimNarrationJob({
+    onDemand: true,
     ownerEmail: " Reader@Example.com ",
     articleId: "article-1",
     folderId: "folder-1",
@@ -278,7 +281,8 @@ test("claims an eligible article job with top-ten recheck, lease, and per-cycle 
   assert.equal(result.job.estimatedCostUsd, 0.123457);
   assert.equal(captured.params[1], "reader@example.com");
   assert.match(captured.statement, /WITH eligible_articles AS/);
-  assert.match(captured.statement, /LIMIT 10/);
+  assert.doesNotMatch(captured.statement, /LIMIT 10|archived_at/);
+  assert.equal(captured.params[18], true);
   assert.equal(result.job.selectionFolderInvalidationVersion, "42");
   assert.equal(captured.params[17], "42");
   assert.match(captured.statement, /article_narration_jobs\.cycle_attempt_count < 2/);
@@ -856,6 +860,7 @@ function segmentRow(overrides = {}) {
 
 function claimJobInput(overrides = {}) {
   return {
+    onDemand: true,
     ownerEmail: "reader@example.com",
     articleId: "article-1",
     folderId: "folder-1",
@@ -887,3 +892,12 @@ function resolveSourceFile(basePath) {
     path.join(basePath, "index.tsx"),
   ].find((candidate) => fs.existsSync(candidate));
 }
+
+
+test("automatic jobs cannot claim or generate audio", async () => {
+  const repository = new PostgresNarrationPolicyRepository({
+    async query() { throw new Error("Must not touch the database for automatic requests"); },
+  });
+  assert.equal(await repository.isNarrationCandidateEligible({}), false);
+  assert.deepEqual(await repository.claimNarrationJob({}), { kind: "not-eligible" });
+});

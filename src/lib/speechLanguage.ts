@@ -120,3 +120,19 @@ function mandarinVoiceScore(voice: BrowserSpeechVoice) {
 
   return score;
 }
+
+// An explicit local choice must never silently select a network voice.
+export function localBrowserSpeechPlan<T extends BrowserSpeechVoice>(
+  text: string, voices: readonly T[], articleLanguage?: SpeechLanguage,
+): { lang: string; voice: T } {
+  const localVoices = voices.filter((voice) => voice.localService === true);
+  const language = articleLanguage ?? detectSpeechLanguage(text);
+  const voice = language === "zh-CN"
+    ? selectBrowserSpeechVoice(localVoices, language)
+    : localVoices.find((voice) => /^en(?:-|$)/i.test(voice.lang) && voice.default)
+      ?? localVoices.find((voice) => /^en(?:-|$)/i.test(voice.lang));
+  if (!voice) {
+    throw new Error(`No installed ${language === "zh-CN" ? "Mandarin" : "English"} voice is available. Download a voice in your device's speech settings, then reload.`);
+  }
+  return { lang: voice.lang, voice };
+}

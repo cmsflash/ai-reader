@@ -80,6 +80,7 @@ export type StoredNarrationJob = {
 };
 
 export type ClaimNarrationJobInput = {
+  onDemand?: boolean;
   ownerEmail: string;
   articleId: string;
   folderId: string;
@@ -215,6 +216,7 @@ export interface NarrationPolicyRepository {
     folderId: string,
   ): Promise<NarrationPolicyCandidate[]>;
   isNarrationCandidateEligible(input: {
+    onDemand?: boolean;
     ownerEmail: string;
     folderId: string;
     articleId: string;

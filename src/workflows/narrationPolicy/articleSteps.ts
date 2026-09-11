@@ -38,6 +38,7 @@ export type NarrationPolicySegmentReference = {
 };
 
 export type ClaimedNarrationPolicyArticle = {
+  onDemand?: boolean;
   kind: "claimed";
   ownerEmail: string;
   folderId: string;
@@ -143,6 +144,10 @@ export async function prepareAndClaimNarrationPolicyArticle(
 ): Promise<NarrationPolicyArticleClaimResult> {
   "use step";
 
+  if (!input.onDemand) {
+    return { kind: "not-eligible", articleId: input.candidate.articleId,
+      error: "Audio is generated only when requested." };
+  }
   const article = await getArticleRepository().findById(
     input.candidate.articleId,
     input.ownerEmail,
@@ -155,7 +160,7 @@ export async function prepareAndClaimNarrationPolicyArticle(
   let prepared: ReturnType<typeof prepareArticleNarration>;
 
   try {
-    prepared = prepareArticleNarration(article);
+    prepared = prepareArticleNarration(article, { onDemand: true });
   } catch (error) {
     return {
       kind: "unsupported",
@@ -178,6 +183,7 @@ export async function prepareAndClaimNarrationPolicyArticle(
 
   const policyRepository = getNarrationPolicyRepository();
   const claim = await policyRepository.claimNarrationJob({
+    onDemand: true,
     ownerEmail: input.ownerEmail,
     articleId: article.id,
     folderId: input.folderId,
@@ -267,6 +273,7 @@ export async function prepareAndClaimNarrationPolicyArticle(
 
   return {
     kind: "claimed",
+    onDemand: true,
     ownerEmail: input.ownerEmail,
     folderId: input.folderId,
     folderInvalidationVersion: input.folderInvalidationVersion,
@@ -768,6 +775,7 @@ async function articleRemainsEligible(
   articleClaim: ClaimedNarrationPolicyArticle,
 ) {
   return getNarrationPolicyRepository().isNarrationCandidateEligible({
+    onDemand: articleClaim.onDemand,
     ownerEmail: articleClaim.ownerEmail,
     folderId: articleClaim.folderId,
     articleId: articleClaim.articleId,

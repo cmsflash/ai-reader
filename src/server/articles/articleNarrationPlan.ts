@@ -66,13 +66,17 @@ export function prepareArticleNarration(
   article: Pick<Article, "id" | "title" | "textContent" | "blocks">,
   options: {
     profile?: ArticleNarrationProfile;
+    onDemand?: boolean;
     targetCodePoints?: number;
     maximumCodePoints?: number;
   } = {},
 ): PreparedArticleNarration {
-  const profile =
+  let profile =
     options.profile ??
     profileForArticle(article.title, article.textContent);
+  if (options.onDemand) {
+    profile = { ...profile, id: `${profile.id}-on-demand-v1` };
+  }
   const targetCodePoints = positiveChunkLimit(
     options.targetCodePoints,
     profile.chunkTargetCodePoints,

@@ -16,6 +16,19 @@ Provider imports are idempotent and content-aware: another sync imports new or c
 deduplicates substantially identical material across providers and the existing library, and retains
 each provider's provenance.
 
+## Audio playback
+
+Choose **Online voice** or **Local voice (offline)** in the reader. Online Play
+requests OpenAI narration only for that article, saves the result, and reuses it
+on later plays. Imports, folder changes, and library visits do not generate audio.
+English uses `tts-1`; Mandarin uses the existing `gpt-4o-mini-tts` profile.
+
+Local voice uses an installed device voice with no TTS API charge. It works for
+an already-open article without a network connection; the app does not download
+or cache the library for offline access. If no matching installed voice exists,
+the reader asks you to download one in device settings. Online mode has an
+optional local fallback. Source and fallback choices persist on this device.
+
 ## AI discussion
 
 - Choose **Discuss** to chat about the entire open article.

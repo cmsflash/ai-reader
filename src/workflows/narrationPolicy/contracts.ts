@@ -49,6 +49,7 @@ export type NarrationPolicyCandidate = {
 };
 
 export type NarrationPolicyArticleInput = {
+  onDemand?: boolean;
   ownerEmail: string;
   folderId: string;
   folderInvalidationVersion: string;
