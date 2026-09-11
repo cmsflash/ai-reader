@@ -20,6 +20,8 @@ export type NarrationTimestampTranscription = {
 
 export type ArticleNarrationSegmentQa = {
   ok: boolean;
+  approximateTiming?: boolean;
+  warnings?: string[];
   expectedCharacters: number;
   transcriptCharacters: number;
   sourceCoverage: number;
@@ -166,12 +168,38 @@ export function alignNarrationSegment(
     failures,
   );
 
+  // Timestamp transcription may omit contractions or normalize words. Preserve
+  // those diagnostics, but permit approximate seeking for otherwise close audio.
+  const approximateTiming = Boolean(
+    profile.allowApproximateTiming && failures.length > 0 &&
+    Number.isFinite(transcription.duration) && transcription.duration > 0 &&
+    sourceCoverage >= 0.8 && exactMatchRatio >= 0.75 &&
+    mapping.maxUnmatchedSourceRun <= 24 &&
+    mapping.maxUnmatchedTranscriptRun <= 24 &&
+    firstAnchorExactRatio >= 0.5 && lastAnchorExactRatio >= 0.5 &&
+    forbiddenQuoteMarkers.length === 0
+  );
+  const warnings = approximateTiming ? [...failures] : [];
+  if (approximateTiming) {
+    sentenceCues.splice(0, sentenceCues.length, ...chunk.parts
+      .filter((part) => part.comparableText.length > 0)
+      .map((part) => ({
+        sentenceIndex: part.sentenceIndex,
+        sentenceText: part.sentenceText,
+        startSeconds: round(transcription.duration * part.comparableStart / expected.length, 3),
+        endSeconds: round(transcription.duration * part.comparableEnd / expected.length, 3),
+      })));
+    failures.length = 0;
+    validateLocalTimeline(sentenceCues, transcription.duration, profile, failures);
+  }
+
   return {
-    model: profile.transcriptionModel,
+    model: approximateTiming ? `${profile.transcriptionModel}-approximate` : profile.transcriptionModel,
     transcriptSha256: sha256Text(transcriptText),
     durationSeconds: round(transcription.duration, 3),
     qa: {
       ok: failures.length === 0,
+      ...(approximateTiming ? { approximateTiming: true, warnings } : {}),
       expectedCharacters: expected.length,
       transcriptCharacters: actual.length,
       sourceCoverage: round(sourceCoverage, 6),

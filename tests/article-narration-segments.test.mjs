@@ -828,3 +828,25 @@ function resolveSourceFile(basePath) {
     }
   });
 }
+
+test("on-demand narration tolerates small alignment gaps with labelled approximate cues", () => {
+  const text = "The opening paragraph explains the research carefully. A shortword appears here. The closing paragraph describes all of the results in considerable detail.";
+  const prepared = prepareArticleNarration(articleFixture({
+    title: "Research summary", textContent: text,
+    blocks: [{ id: "p-1", type: "paragraph", text }],
+  }), { onDemand: true });
+  const chunk = prepared.chunks[0];
+  const transcript = timestampTranscription(chunk.expectedComparableText.replace("shortword", ""));
+  const aligned = alignNarrationSegment(chunk, prepared.profile, transcript);
+  assert.equal(aligned.qa.ok, true);
+  assert.equal(aligned.qa.approximateTiming, true);
+  assert.ok(aligned.qa.warnings.length > 0);
+  assert.ok(aligned.qa.sourceCoverage < 1);
+  assert.match(aligned.model, /approximate$/);
+  assert.equal(aligned.sentenceCues.length, chunk.parts.length);
+  assert.equal(aligned.sentenceCues[0].startSeconds, 0);
+  assert.equal(aligned.sentenceCues.at(-1).endSeconds, aligned.durationSeconds);
+  const truncated = alignNarrationSegment(chunk, prepared.profile,
+    timestampTranscription(chunk.expectedComparableText.slice(0, 40)));
+  assert.equal(truncated.qa.ok, false);
+});

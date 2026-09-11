@@ -20,7 +20,8 @@ each provider's provenance.
 
 Choose **Online voice** or **Local voice (offline)** in the reader. Online Play
 requests OpenAI narration only for that article, saves the result, and reuses it
-on later plays. Imports, folder changes, and library visits do not generate audio.
+on later plays. Sentence timing may be approximate when transcription alignment
+is uncertain; substantial content mismatches still fail. Imports, folder changes, and library visits do not generate audio.
 English uses `tts-1`; Mandarin uses the existing `gpt-4o-mini-tts` profile.
 
 Local voice uses an installed device voice with no TTS API charge. It works for

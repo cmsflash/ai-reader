@@ -360,7 +360,9 @@ export function assembleArticleNarration(
     segments,
     alignment: {
       version: 1,
-      model: prepared.profile.transcriptionModel,
+      model: ordered.some((segment) => segment.qa.approximateTiming)
+        ? `${prepared.profile.transcriptionModel}-approximate`
+        : prepared.profile.transcriptionModel,
       generatedAt,
       transcriptSha256: sha256Text(
         ordered.map(({ transcriptSha256 }) => transcriptSha256).join("\n"),

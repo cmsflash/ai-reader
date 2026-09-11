@@ -9,6 +9,7 @@ export type ArticleNarrationProfile = {
   speechModel: string;
   voice: string;
   speechInstructions?: string;
+  allowApproximateTiming?: boolean;
   transcriptionModel: "whisper-1";
   transcriptionLanguage: "zh" | "en";
   responseFormat: "mp3";

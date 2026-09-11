@@ -75,7 +75,7 @@ export function prepareArticleNarration(
     options.profile ??
     profileForArticle(article.title, article.textContent);
   if (options.onDemand) {
-    profile = { ...profile, id: `${profile.id}-on-demand-v1` };
+    profile = { ...profile, id: `${profile.id}-on-demand-v2`, allowApproximateTiming: true };
   }
   const targetCodePoints = positiveChunkLimit(
     options.targetCodePoints,
