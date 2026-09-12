@@ -51,7 +51,7 @@ export async function POST(request: Request) {
           throw new Error("Invalid progress.");
         await sql.query(
           `UPDATE articles SET progress_sentence_index=LEAST(GREATEST($3,0),GREATEST(sentence_count-1,0)),
-          progress_percent=LEAST(GREATEST($4,0),1), progress_updated_at=$5, updated_at=GREATEST(updated_at,$5::timestamptz)
+          progress_percent=LEAST(GREATEST($4::double precision,0),1), progress_updated_at=$5, updated_at=GREATEST(updated_at,$5::timestamptz)
           WHERE id=$1 AND owner_email=$2 AND progress_updated_at <= $5::timestamptz`,
           [articleId, owner, p.sentenceIndex, p.percent, at],
         );
