@@ -363,7 +363,20 @@ export async function synchronize() {
         const absolute = new URL(url, location.origin);
         if (absolute.origin !== location.origin) continue;
         wanted.add(absolute.href);
-        if (!changed && (await media.match(absolute.href))) continue;
+        const isAudio = /^\/api\/articles\/[^/]+\/audio$/.test(
+          absolute.pathname,
+        );
+        const audioVersionKey = key(
+          `audio:${absolute.pathname}${absolute.search}`,
+        );
+        const audioVersion = JSON.stringify([
+          narration?.generationFingerprint,
+          narration?.generatedAt,
+        ]);
+        const freshAudio =
+          !changed || (await read<string>(audioVersionKey)) === audioVersion;
+        if ((!isAudio || freshAudio) && (await media.match(absolute.href)))
+          continue;
         report(`Saving images and audio · ${article.title}`);
         try {
           let resource: Response | undefined;
@@ -389,6 +402,8 @@ export async function synchronize() {
           if (!resource) throw new Error("Media unavailable");
           if (!valid()) return;
           await media.put(absolute.href, resource);
+          if (isAudio && valid())
+            await write([[audioVersionKey, audioVersion]]);
         } catch {
           failed++;
           allSaved = false;

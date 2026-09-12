@@ -151,10 +151,16 @@ test("cold offline library reads, reversible progress, folder creation, deletion
     updatedAt: new Date(Date.now() + 1000).toISOString(),
     textContent: "Updated through batch sync",
   };
+  const media = new Map();
+  let savedImageRequests = 0;
+  let missingImageRequests = 0;
   globalThis.caches.open = async () => ({
-    keys: async () => [],
-    match: async () => undefined,
-    put: async () => {},
+    keys: async () => [...media.keys()].map((url) => ({ url })),
+    match: async (url) => media.get(url),
+    put: async (url, response) => {
+      media.set(url, response);
+    },
+    delete: async (request) => media.delete(request.url),
   });
   globalThis.fetch = async (url, init) => {
     if (url === "/api/auth/me")
@@ -172,6 +178,14 @@ test("cold offline library reads, reversible progress, folder creation, deletion
       });
     if (url.startsWith("/api/offline/articles?"))
       return Response.json({ articles: [current] });
+    if (url.endsWith("/api/image?good")) {
+      savedImageRequests++;
+      return new Response("image");
+    }
+    if (url.endsWith("/api/image?missing")) {
+      missingImageRequests++;
+      return new Response("missing", { status: 404 });
+    }
     throw new Error("Unexpected network request: " + url);
   };
   await synchronize();
@@ -183,6 +197,23 @@ test("cold offline library reads, reversible progress, folder creation, deletion
   assert.deepEqual(
     replay.map((o) => o.method),
     ["PATCH", "POST", "PATCH"],
+  );
+  current.blocks = [
+    { type: "image", id: "good", src: "/api/image?good" },
+    { type: "image", id: "missing", src: "/api/image?missing" },
+  ];
+  current.updatedAt = new Date(Date.now() + 2000).toISOString();
+  await synchronize();
+  await synchronize();
+  assert.equal(
+    savedImageRequests,
+    1,
+    "retry must reuse the successfully saved image",
+  );
+  assert.equal(
+    missingImageRequests,
+    2,
+    "unavailable media should retry automatically",
   );
   navigator.onLine = false;
   globalThis.fetch = async () => {
