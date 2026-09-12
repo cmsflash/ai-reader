@@ -1,4 +1,4 @@
-import { SignIn } from "@clerk/nextjs";
+import { ClerkProvider, SignIn } from "@clerk/nextjs";
 import { AuthSetupPage, AuthShell } from "@/components/AuthPages";
 import { isClerkConfigured } from "@/server/auth/config";
 
@@ -8,8 +8,8 @@ export default function Page() {
   }
 
   return (
-    <AuthShell>
+    <ClerkProvider><AuthShell>
       <SignIn path="/sign-in" routing="path" />
-    </AuthShell>
+    </AuthShell></ClerkProvider>
   );
 }

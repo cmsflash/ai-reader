@@ -4849,3 +4849,5 @@ input[type="range"] {
   font: inherit;
 }
 .audio-preferences [role="status"] { flex-basis: 100%; }
+
+.offline-status { position: fixed; bottom: 4px; left: 12px; z-index: 30; max-width: calc(100vw - 24px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--muted, #777); pointer-events: none; background: var(--background, #fff); border-radius: 4px; padding: 2px 5px; }

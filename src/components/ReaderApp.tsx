@@ -39,6 +39,7 @@ import {
   type ArticleDiscussionPhoneSnap,
   type ArticleDiscussionScope,
 } from "@/components/ArticleDiscussion";
+import { rememberArticle, synchronize, offlineRequest, offlineAuth, offlineNotice, startOfflineSync, clearOfflineLibrary } from "@/lib/offlineLibrary";
 import { AuthSignOutButton } from "@/components/AuthSignOutButton";
 import {
   annotateBlocks,
@@ -265,7 +266,14 @@ function writeAppHistory(mode: "push" | "replace", entry: AppHistoryEntry) {
   }
 }
 
-export function ReaderApp() {
+export function ReaderApp({ offlineShell = false }: { offlineShell?: boolean }) {
+  const [offlineStatus, setOfflineStatus] = useState("Preparing offline library…");
+  useEffect(() => {
+    const update = () => setOfflineStatus(offlineNotice());
+    window.addEventListener("reader-offline-status", update);
+    const stop = startOfflineSync();
+    return () => { stop(); window.removeEventListener("reader-offline-status", update); };
+  }, []);
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [articleTotal, setArticleTotal] = useState(0);
   const [activeArticleTotal, setActiveArticleTotal] = useState(0);
@@ -774,16 +782,10 @@ export function ReaderApp() {
     let cancelled = false;
 
     async function loadAuthStatus() {
-      const response = await fetch("/api/auth/me");
-
-      if (!response.ok) {
-        return;
-      }
-
-      const data = (await response.json()) as AuthStatusResponse;
+      const data = await offlineAuth() as AuthStatusResponse;
 
       if (!cancelled) {
-        setAuthStatus(data);
+        setAuthStatus(offlineShell ? { ...data, enabled: false } : data);
       }
     }
 
@@ -792,7 +794,15 @@ export function ReaderApp() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [offlineShell]);
+
+  useEffect(() => {
+    const refresh = () => { void loadFolders(); void loadArticles(false); };
+    const clear = () => { setArticle(null); setArticles([]); setFolders([]); setActiveArticleTotal(0); setArticleTotal(0); };
+    window.addEventListener("reader-offline-synced", refresh);
+    window.addEventListener("reader-offline-cleared", clear);
+    return () => { window.removeEventListener("reader-offline-synced", refresh); window.removeEventListener("reader-offline-cleared", clear); };
+  }, [loadFolders, loadArticles]);
 
   useEffect(() => {
     void loadFolders();
@@ -981,7 +991,7 @@ export function ReaderApp() {
   const saveProgress = useCallback(async (sentenceIndex: number) => {
     const id = articleIdRef.current;
 
-    if (!id || !navigator.onLine) {
+    if (!id) {
       return;
     }
 
@@ -1376,7 +1386,7 @@ export function ReaderApp() {
         speakLocalFrom(startIndex, session);
       };
       if (voiceMode === "local") { playLocal(); return; }
-      if (!navigator.onLine) {
+      if (!navigator.onLine && !article.narration) {
         if (localFallback) { playLocal(); }
         else { setIsSpeaking(false); setError("You're offline. Choose Local voice to listen."); }
         return;
@@ -1394,6 +1404,8 @@ export function ReaderApp() {
             if (!response.ok || result.status === "failed") throw new Error(result.error ?? "Online narration failed.");
             if (result.status === "ready" && result.article?.narration) {
               playable = result.article;
+              await rememberArticle(playable);
+              void synchronize().catch(() => undefined);
               setArticle((current) => current?.id === playable.id ? playable : current);
               break;
             }
@@ -2487,6 +2499,7 @@ export function ReaderApp() {
 
   return (
     <main className={readerAppClassName}>
+      <div className="offline-status" role="status">{offlineStatus}</div>
       {appView === "library" ? (
         <section className="library-panel app-surface" aria-label="Library">
           <header className="app-bar library-app-bar">
@@ -2534,7 +2547,7 @@ export function ReaderApp() {
                 <span>Settings</span>
               </button>
               {authStatus?.enabled ? (
-                <AuthSignOutButton onBeforeSignOut={stopSpeaking} />
+                <AuthSignOutButton onBeforeSignOut={async () => { stopSpeaking(); await clearOfflineLibrary(); }} />
               ) : null}
             </div>
           </header>
@@ -4267,7 +4280,7 @@ function emptyIntegrationSyncResponse(): IntegrationSyncResponse {
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await offlineRequest(url, init);
   const data = (await response.json().catch(() => ({}))) as { error?: string };
 
   if (!response.ok) {

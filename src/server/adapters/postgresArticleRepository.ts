@@ -552,6 +552,7 @@ export class PostgresArticleRepository implements ArticleRepository {
         UPDATE articles
         SET
           updated_at = $3::timestamptz,
+          organization_updated_at = $3::timestamptz,
           archived_at = CASE
             WHEN $4::boolean IS NULL THEN archived_at
             WHEN $4::boolean THEN COALESCE(archived_at, $3::timestamptz)

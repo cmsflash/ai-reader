@@ -1,3 +1,4 @@
+import { ClerkProvider } from "@clerk/nextjs";
 import { redirect } from "next/navigation";
 import { AccessDeniedPage, AuthSetupPage } from "@/components/AuthPages";
 import { ReaderApp } from "@/components/ReaderApp";
@@ -18,5 +19,5 @@ export default async function Home() {
     return <AccessDeniedPage email={authStatus.email} />;
   }
 
-  return <ReaderApp />;
+  return authStatus.configured ? <ClerkProvider><ReaderApp /></ClerkProvider> : <ReaderApp />;
 }

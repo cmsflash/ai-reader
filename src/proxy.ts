@@ -3,6 +3,7 @@ import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server
 import { isClerkConfigured, shouldBypassAuthLocally } from "@/server/auth/config";
 
 const isPublicRoute = createRouteMatcher([
+  "/offline",
   "/sign-in(.*)",
   "/sign-up(.*)",
   "/auth/setup(.*)",
