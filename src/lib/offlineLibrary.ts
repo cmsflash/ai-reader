@@ -244,34 +244,41 @@ export async function synchronize() {
     const old = (await read<ArticleSummary[]>(key("summaries"))) ?? [];
     let complete = 0;
     // Bodies first: images and narration never delay offline reading of other articles.
-    await concurrent(snapshot.articles, 4, async (summary) => {
+    const batches: ArticleSummary[][] = [];
+    for (let i = 0; i < snapshot.articles.length; i += 12)
+      batches.push(snapshot.articles.slice(i, i + 12));
+    await concurrent(batches, 2, async (batch) => {
       if (!valid()) return;
-      const stored = await read<Article>(key(`article:${summary.id}`));
-      if (
-        !stored ||
-        stored.updatedAt !== summary.updatedAt ||
-        stored.progress.updatedAt !== summary.progress.updatedAt
-      ) {
-        const articleResponse = await fetch(
-          `/api/articles/${encodeURIComponent(summary.id)}`,
-          { signal: AbortSignal.timeout(20000) },
-        );
-        if (!articleResponse.ok) {
-          if (articleResponse.status === 404) return;
-          throw new Error("Article sync failed");
-        }
-        const { article } = (await articleResponse.json()) as {
-          article: Article;
-        };
+      const missing: string[] = [];
+      for (const summary of batch) {
+        const stored = await read<Article>(key(`article:${summary.id}`));
+        if (
+          !stored ||
+          stored.updatedAt !== summary.updatedAt ||
+          stored.progress.updatedAt !== summary.progress.updatedAt
+        )
+          missing.push(summary.id);
+      }
+      if (missing.length) {
+        const articles = await fetchArticleBatch(missing);
         await locked(async () => {
           if (!valid()) return;
           const queue = (await read<Operation[]>(key("queue"))) ?? [];
-          if (!queue.some((o) => o.target === `/api/articles/${summary.id}`))
-            await write([[key(`article:${summary.id}`), article]]);
+          await write(
+            articles
+              .filter(
+                (article) =>
+                  !queue.some(
+                    (o) => o.target === `/api/articles/${article.id}`,
+                  ),
+              )
+              .map((article) => [key(`article:${article.id}`), article]),
+          );
         });
       }
+      complete += batch.length;
       report(
-        `Preparing offline library · ${++complete}/${snapshot.articles.length} articles`,
+        `Preparing offline library · ${complete}/${snapshot.articles.length} articles`,
       );
     });
     await locked(async () => {
@@ -483,7 +490,10 @@ export async function offlineRequest(
               ...article.progress,
               ...body.progress,
               percent: Math.min(1, Math.max(0, body.progress.percent)),
-              sentenceIndex: Math.min(Math.max(0, body.progress.sentenceIndex), Math.max(0, article.sentenceCount - 1)),
+              sentenceIndex: Math.min(
+                Math.max(0, body.progress.sentenceIndex),
+                Math.max(0, article.sentenceCount - 1),
+              ),
               updatedAt: at,
             };
           if (body.organization) {
@@ -627,4 +637,22 @@ export async function rememberArticle(article: Article) {
       ]);
     await write(entries);
   });
+}
+
+async function fetchArticleBatch(ids: string[]): Promise<Article[]> {
+  const query = new URLSearchParams(ids.map((id) => ["id", id]));
+  const response = await fetch(`/api/offline/articles?${query}`, {
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!response.ok) {
+    if (ids.length > 1 && response.status >= 413) {
+      const middle = Math.ceil(ids.length / 2);
+      return [
+        ...(await fetchArticleBatch(ids.slice(0, middle))),
+        ...(await fetchArticleBatch(ids.slice(middle))),
+      ];
+    }
+    throw new Error("Article sync failed");
+  }
+  return ((await response.json()) as { articles: Article[] }).articles;
 }

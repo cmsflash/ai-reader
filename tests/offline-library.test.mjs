@@ -146,7 +146,11 @@ test("cold offline library reads, reversible progress, folder creation, deletion
     "failed replay must preserve durable changes",
   );
   const replay = [];
-  const current = await get("user@test:article:one");
+  const current = {
+    ...(await get("user@test:article:one")),
+    updatedAt: new Date(Date.now() + 1000).toISOString(),
+    textContent: "Updated through batch sync",
+  };
   globalThis.caches.open = async () => ({
     keys: async () => [],
     match: async () => undefined,
@@ -166,10 +170,16 @@ test("cold offline library reads, reversible progress, folder creation, deletion
         folders: [folder],
         imports: [],
       });
+    if (url.startsWith("/api/offline/articles?"))
+      return Response.json({ articles: [current] });
     throw new Error("Unexpected network request: " + url);
   };
   await synchronize();
   assert.equal((await get("user@test:queue")).length, 0);
+  assert.equal(
+    (await get("user@test:article:one")).textContent,
+    "Updated through batch sync",
+  );
   assert.deepEqual(
     replay.map((o) => o.method),
     ["PATCH", "POST", "PATCH"],
