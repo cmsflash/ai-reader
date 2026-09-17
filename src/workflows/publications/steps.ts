@@ -7,6 +7,19 @@ import type {
   PublicationEntry,
   PublicationSource,
 } from "@/server/publications/sources";
+import { publicationSources } from "@/server/publications/sources";
+export async function subscribedSources(owner: string) {
+  "use step";
+  const subscriptions = await getDatabaseSql().query(
+    "SELECT source FROM publication_subscriptions WHERE owner_email=$1 ORDER BY source",
+    [owner],
+  );
+  return subscriptions
+    .map((row) => String(row.source))
+    .filter((source): source is PublicationSource =>
+      Object.hasOwn(publicationSources, source),
+    );
+}
 export async function discover(source: PublicationSource) {
   "use step";
   return discoverPublication(source);

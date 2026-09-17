@@ -8,6 +8,10 @@ export const publicationSources = {
     name: "Anthropic Alignment Science",
     url: "https://alignment.anthropic.com/",
   },
+  "rundown-ai": {
+    name: "The Rundown AI",
+    url: "https://www.therundown.ai/articles-category/ai",
+  },
 } as const;
 export type PublicationSource = keyof typeof publicationSources;
 export type PublicationEntry = {
@@ -52,6 +56,24 @@ export function publicationEntries(
           url.pathname !== new URL(base).pathname
         )
           entries.push({ url: url.href, title });
+      }
+    } else if (source === "rundown-ai") {
+      for (const link of document.querySelectorAll<HTMLAnchorElement>(
+        'a[href] > h3',
+      )) {
+        const anchor = link.parentElement as HTMLAnchorElement;
+        const url = new URL(anchor.href, base);
+        const title = link.textContent?.trim();
+        if (
+          title &&
+          url.origin === new URL(base).origin &&
+          /^\/articles\/[^/]+\/?$/.test(url.pathname) &&
+          anchor.querySelector("span")?.textContent?.trim() === "AI"
+        ) {
+          url.search = "";
+          url.hash = "";
+          entries.push({ url: url.href, title });
+        }
       }
     } else {
       for (const link of document.querySelectorAll<HTMLAnchorElement>(

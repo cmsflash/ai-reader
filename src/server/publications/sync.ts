@@ -26,9 +26,12 @@ export async function subscribePublication(
       [owner, source],
     );
     if (existing[0]) return String(existing[0].folder_id);
-    const folder = await getArticleRepository().createFolder(
-      publicationSources[source].name,
-      owner,
+    const folders = await sql.query(
+      "SELECT id FROM reading_folders WHERE owner_email=$1 AND name=$2 ORDER BY created_at LIMIT 1",
+      [owner, publicationSources[source].name],
+    );
+    const folder = folders[0] ?? await getArticleRepository().createFolder(
+      publicationSources[source].name, owner,
     );
     await sql.query(
       "INSERT INTO publication_subscriptions(owner_email,source,folder_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",

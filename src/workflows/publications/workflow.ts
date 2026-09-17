@@ -1,5 +1,16 @@
-import { discover, importEntry, finish } from "./steps";
+import { discover, importEntry, finish, subscribedSources } from "./steps";
 import type { PublicationSource } from "@/server/publications/sources";
+export async function syncSubscribedPublications(owner: string) {
+  "use workflow";
+  const sources = await subscribedSources(owner);
+  const results = [];
+  // One durable run per reader processes every source in turn, avoiding competing
+  // article writes while keeping a source failure from skipping the others.
+  for (const source of sources) {
+    results.push({ source, ...await syncPublication(owner, source) });
+  }
+  return results;
+}
 export async function syncPublication(
   owner: string,
   source: PublicationSource,

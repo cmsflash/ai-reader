@@ -1,11 +1,7 @@
 import { NextResponse } from "next/server";
 import { start } from "workflow/api";
 import { getDatabaseSql } from "@/server/database";
-import {
-  publicationSources,
-  type PublicationSource,
-} from "@/server/publications/sources";
-import { syncPublication } from "@/workflows/publications/workflow";
+import { syncSubscribedPublications } from "@/workflows/publications/workflow";
 export async function GET(request: Request) {
   if (
     !process.env.CRON_SECRET ||
@@ -13,15 +9,12 @@ export async function GET(request: Request) {
   )
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const subscriptions = await getDatabaseSql().query(
-    "SELECT owner_email,source FROM publication_subscriptions",
+    "SELECT DISTINCT owner_email FROM publication_subscriptions ORDER BY owner_email",
   );
   const runs = [];
   for (const subscription of subscriptions) {
-    if (!Object.hasOwn(publicationSources, String(subscription.source)))
-      continue;
-    const run = await start(syncPublication, [
+    const run = await start(syncSubscribedPublications, [
       String(subscription.owner_email),
-      subscription.source as PublicationSource,
     ]);
     runs.push(run.runId);
   }

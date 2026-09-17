@@ -7,13 +7,17 @@ import {
   type PublicationSource,
 } from "@/server/publications/sources";
 import { subscribePublication } from "@/server/publications/sync";
-import { syncPublication } from "@/workflows/publications/workflow";
+import { syncPublication, syncSubscribedPublications } from "@/workflows/publications/workflow";
 export async function POST(request: Request) {
   const token = requireImportToken(request);
   const auth = token ? null : await requireAppUser();
   if (auth?.response) return auth.response;
   const owner = token?.email ?? auth!.user!.ownerEmail;
   const body = await request.json().catch(() => ({}));
+  if (body.all === true) {
+    const run = await start(syncSubscribedPublications, [owner]);
+    return NextResponse.json({ runId: run.runId }, { status: 202 });
+  }
   if (
     typeof body.source !== "string" ||
     !Object.hasOwn(publicationSources, body.source)

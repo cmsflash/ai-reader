@@ -40,3 +40,16 @@ test("a layout change raises an error instead of silently reporting success", ()
     /No publications found/,
   );
 });
+test("Rundown only imports AI newsletter cards and deduplicates tracking URLs", () => {
+  const entries = publicationEntries("rundown-ai", `<main>
+    <a href="/articles/new-ai?utm_source=web"><span>AI</span><h3>New AI</h3></a>
+    <a href="/articles/new-ai"><span>AI</span><h3>New AI</h3></a>
+    <a href="/articles/tech"><span>Tech</span><h3>Tech</h3></a>
+    <a href="/news/story"><span>AI</span><h3>News</h3></a>
+    <a href="https://other.test/articles/story"><span>AI</span><h3>Other</h3></a>
+    <a href="/articles-category/ai"><h3>AI archive</h3></a>
+  </main>`);
+  assert.deepEqual(entries, [{
+    url: "https://www.therundown.ai/articles/new-ai", title: "New AI",
+  }]);
+});
