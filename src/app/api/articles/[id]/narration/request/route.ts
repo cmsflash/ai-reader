@@ -1,3 +1,7 @@
+import { BlobNotFoundError, head } from "@vercel/blob";
+import { getDatabaseSql } from "@/server/database";
+import { missingNarrationKeys } from "@/server/articles/narrationRecovery";
+import { getArtifactStorage } from "@/server/runtime/artifactStorage";
 import { NextResponse } from "next/server";
 import { start } from "workflow/api";
 import { requireAppUser } from "@/server/auth/access";
@@ -22,8 +26,36 @@ async function handle(context: Context, generate: boolean) {
     const json = (value: unknown, status = 200) => NextResponse.json(value, {
       status, headers: { "cache-control": "no-store" },
     });
+    let missing: string[] = [];
+    let restarted = false;
     if (article.narration?.sourceTextSha256 === prepared.sourceTextSha256) {
-      return json({ status: "ready", article });
+      missing = await missingNarrationKeys(article, async key => {
+        if (process.env.ARTIFACT_STORAGE_DRIVER !== "vercel-blob")
+          return Boolean(await getArtifactStorage().getUrl(key));
+        try { await head(key); return true; }
+        catch (error) { if (error instanceof BlobNotFoundError) return false; throw error; }
+      });
+      if (!missing.length) return json({ status: "ready", article });
+      if (!generate) return json({ status: "missing", error: "Saved audio was removed. Press Play to regenerate it." });
+    }
+    if (generate && process.env.ARTICLE_REPOSITORY_DRIVER === "postgres") {
+      const sql = getDatabaseSql();
+      // Only an explicit Play may reset missing audio. Keep costs and successful segments.
+      const reset = await sql.query(`WITH reset_job AS (
+        UPDATE article_narration_jobs SET status='pending',attempt_id=NULL,workflow_run_id=NULL,
+        lease_expires_at=NULL,cycle_attempt_count=0,cycle_exhausted_at=NULL,next_attempt_at=now(),
+        error_message=NULL,updated_at=now() WHERE owner_email=$1 AND article_id=$2 AND generation_fingerprint=$3
+        AND (status='completed' AND $4::boolean OR status='cancelled' AND error_message LIKE 'Saved audio was removed%')
+        RETURNING id
+      ), reset_segments AS (
+        UPDATE article_narration_job_segments s SET status='pending',artifact_key=NULL,
+          byte_length=NULL,alignment=NULL,local_sentence_cues=NULL,qa=NULL,attempt_id=NULL,job_attempt_id=NULL,
+          lease_expires_at=NULL,cycle_attempt_count=0,next_attempt_at=now(),updated_at=now()
+        FROM reset_job j WHERE s.job_id=j.id AND (s.artifact_key=ANY($5::text[]) OR s.artifact_key IS NULL)
+        RETURNING s.job_id
+      ) SELECT id FROM reset_job`, [ownerEmail,id,prepared.generationFingerprint,missing.length > 0,missing]);
+      restarted = reset.length > 0;
+      if (missing.length) await getArticleRepository().updateNarration(id,ownerEmail,null);
     }
     const job = await getNarrationPolicyRepository().findNarrationJob(ownerEmail, id, prepared.generationFingerprint);
     if (job?.status === "cancelled" || job?.status === "failed") {
@@ -32,7 +64,7 @@ async function handle(context: Context, generate: boolean) {
     if (job?.status === "completed") {
       return json({ status: "failed", error: "Saved narration is unavailable. You can use Local voice." });
     }
-    if (!generate || job?.status === "running" || job?.status === "pending") {
+    if (!generate || job?.status === "running" || (job?.status === "pending" && !restarted)) {
       return json({ status: "generating" }, 202);
     }
     if (!article.folderId) return json({ error: "Move this article into a folder before generating audio." }, 400);

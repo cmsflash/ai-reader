@@ -1393,8 +1393,8 @@ export function ReaderApp({ offlineShell = false }: { offlineShell?: boolean }) 
       }
       void (async () => {
         let playable = article;
-        if (!playable.narration) {
-          setAudioNotice("Generating audio for this article… You can use Local voice while it prepares.");
+        if (!playable.narration || navigator.onLine) {
+          setAudioNotice(playable.narration ? "Checking saved audio…" : "Generating audio for this article… You can use Local voice while it prepares.");
           const url = `/api/articles/${encodeURIComponent(article.id)}/narration/request`;
           let response = await fetch(url, { method: "POST" });
           const deadline = Date.now() + 15 * 60_000;
@@ -4081,12 +4081,16 @@ function ArticleImageBlock({
   );
   const sourceIdentity = sources.join("\0");
   const [sourceIndex, setSourceIndex] = useState(0);
+  const [imageReload, setImageReload] = useState(0);
 
   useEffect(() => {
     setSourceIndex(0);
   }, [sourceIdentity]);
 
-  const src = sources[sourceIndex];
+  const source = sources[sourceIndex];
+  const src = source && imageReload
+    ? `${source}${source.includes("?") ? "&" : "?"}reload=${imageReload}`
+    : source;
 
   return (
     <figure className="article-image-block">
@@ -4105,8 +4109,11 @@ function ArticleImageBlock({
           }}
         />
       ) : (
-        <div className="image-placeholder" aria-hidden="true">
-          Image
+        <div className="image-placeholder">
+          <button type="button" onClick={() => {
+            setImageReload(Date.now());
+            setSourceIndex(sources.length > 1 ? sources.length - 1 : 0);
+          }}>Reload image</button>
         </div>
       )}
       {block.chunks.length > 0 ? (

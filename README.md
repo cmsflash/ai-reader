@@ -93,3 +93,23 @@ types](https://support.apple.com/guide/shortcuts/understanding-input-types-apd76
 ## License
 
 MIT
+
+## Media retention
+
+A daily protected Vercel cron removes unused article images and cancelled-job audio
+older than seven days. Cached article images older than 30 days are also removed
+when every reference has an original HTTP source outside Blob. The saved article
+keeps that original URL, and the reader loads it through the image proxy. A failed
+image offers **Reload image**. Current paid narration, images with no recoverable
+original, review fixtures, and unrelated uploads are retained.
+
+Online Play checks that saved narration files still exist. Missing audio is regenerated
+only after pressing Play; a storage outage does not count as a missing file.
+Set `CRON_SECRET` in production to authenticate `/api/cron/media`.
+
+For a manual inventory and cleanup of unused images and cancelled-job audio:
+
+```bash
+node scripts/cleanup-media.mjs          # preview only
+node scripts/cleanup-media.mjs --apply
+```
