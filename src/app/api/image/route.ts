@@ -23,6 +23,7 @@ export async function GET(request: Request) {
 
     const { response } = await fetchPublicResource(imageUrl.href, {
       headers: imageFetchHeaders(imageUrl, sourceUrl),
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]),
       ...(requestUrl.searchParams.has("reload") ? { cache: "no-store" as const } : {}),
     });
 

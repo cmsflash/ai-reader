@@ -4110,7 +4110,7 @@ function ArticleImageBlock({
         />
       ) : (
         <div className="image-placeholder">
-          <button type="button" onClick={() => {
+          <button className="secondary-button" type="button" onClick={() => {
             setImageReload(Date.now());
             setSourceIndex(sources.length > 1 ? sources.length - 1 : 0);
           }}>Reload image</button>
